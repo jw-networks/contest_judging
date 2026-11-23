@@ -191,10 +191,8 @@ function runOrder() {
 }
 
 // ---------- persistence
-const persist = debounce(() => {
-  if (!S.account) return;
-  kv('cj-u-' + S.account.username, 'state', { rev: S.rev, schema: S.schema, data: S.data, outbox: S.outbox }).catch(e => console.error(e));
-}, 200);
+const saveNow = () => S.account ? kv('cj-u-' + S.account.username, 'state', { rev: S.rev, schema: S.schema, data: S.data, outbox: S.outbox }).catch(e => console.error(e)) : Promise.resolve();
+const persist = debounce(saveNow, 200);
 
 // ---------- local mutation + outbox
 function mergePatch(coll, base, patch) {
@@ -369,6 +367,8 @@ async function startSession(acc) {
   S.outbox = (saved?.outbox || []).map(o => { delete o.sending; return o; });
   S.account.username = acc.username.toLowerCase();
   await kv(DEVICE_DB, 'active', S.account.username);
+  // Each browser tab keeps its own sign-in, so two people can use two tabs/windows of one browser.
+  try { sessionStorage.setItem('cj-active', S.account.username); } catch {}
   S.net = 'offline';
   if (location.hash === '#/login') location.hash = '#/';
   render();
@@ -399,11 +399,22 @@ async function login(username, password) {
 async function logout() {
   if (S.outbox.length && !confirm(`${S.outbox.length} change(s) haven't reached the server yet. They stay saved on this device and will sync next time ${S.account.user.displayName} signs in here. Sign out anyway?`)) return;
   const acc = S.account;
+  await saveNow();
   if (acc.token) api('/api/logout', {}, { token: acc.token }).catch(() => {});
   await saveAccount({ ...acc, token: null });
-  await kv(DEVICE_DB, 'active', null);
+  try { sessionStorage.removeItem('cj-active'); } catch {}
+  if ((await kv(DEVICE_DB, 'active').catch(() => null)) === acc.username) await kv(DEVICE_DB, 'active', null);
   S.account = null; S.data = EMPTY(); S.outbox = []; S.rev = 0;
   clearPhotoCache().catch(() => {}); // shared tablets: the next person re-downloads only what they may see
+  location.hash = '#/login';
+  render();
+}
+
+// Let someone else sign in on this tab without signing the current person out of their other tabs or devices.
+async function switchPerson() {
+  await saveNow(); // keep unsent scores; they send when this person is back
+  try { sessionStorage.removeItem('cj-active'); } catch {}
+  S.account = null; S.data = EMPTY(); S.outbox = []; S.rev = 0;
   location.hash = '#/login';
   render();
 }
@@ -657,6 +668,7 @@ function accountMenu() {
       },
     }, 'Change password')),
   [isAdmin() ? h('a.btn.ghost', { href: '#/admin', onclick: () => close() }, icon('admin'), 'Admin page') : null,
+    h('button.btn.ghost', { title: 'Sign someone else in on this tab. You stay signed in elsewhere.', onclick: () => { close(); switchPerson(); } }, 'Switch person'),
     h('button.btn.danger', { onclick: () => { close(); logout(); } }, 'Sign out')]);
 }
 
@@ -1864,7 +1876,8 @@ function importBox() {
   if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('sw.js').catch(() => {});
   connectEvents();
   try {
-    const active = await kv(DEVICE_DB, 'active');
+    let tabUser = null; try { tabUser = sessionStorage.getItem('cj-active'); } catch {}
+    const active = tabUser || await kv(DEVICE_DB, 'active');
     const acc = active && (await getAccounts())[active];
     if (acc) { await startSession(acc); return; }
   } catch (e) { console.error(e); }
