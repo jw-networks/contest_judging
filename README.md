@@ -1,6 +1,6 @@
-# Cosplay Contest Judge
+# Spotlight
 
-An offline-first scoring app for cosplay contests: check-in, a stage timer with a confidence monitor, judge scoring, results and audited score review. It runs in any browser, installs on tablets, and keeps working when the Wi-Fi drops.
+**Cosplay contest judging.** An offline-first scoring app for cosplay contests: check-in, a stage timer with a confidence monitor, judge scoring, results and audited score review. It runs in any browser, installs on tablets, and keeps working when the Wi-Fi drops.
 
 ## How it fits together
 

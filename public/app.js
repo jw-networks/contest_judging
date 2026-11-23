@@ -70,6 +70,27 @@ function parseCSV(text) {
   return rows.filter(r => r.some(x => x.trim()));
 }
 
+// ============================================================ icons (static SVG strings)
+const APP_NAME = 'Spotlight';
+const ICONS = {
+  results: '<path d="M8 4h8v5a4 4 0 0 1-8 0z"/><path d="M8 6H5a3 3 0 0 0 3 4M16 6h3a3 3 0 0 1-3 4M12 13v4M8 21h8M10 17h4"/>',
+  review: '<rect x="5" y="4" width="14" height="17"/><path d="M9 4V2.5h6V4M8.5 12.5l2.5 2.5 4.5-5"/>',
+  checkin: '<circle cx="10" cy="8" r="4"/><path d="M3 20c1-4 4-6 7-6 1.6 0 3 .4 4.2 1.2M15 18l2 2 4-4.5"/>',
+  stage: '<circle cx="12" cy="13.5" r="7.5"/><path d="M12 13.5V9M9.5 2.5h5M18.5 6.5l1.5-1.5"/>',
+  judge: '<path d="M12 3l2.7 5.6 6.1.8-4.5 4.2 1.1 6.1L12 16.8l-5.4 2.9 1.1-6.1-4.5-4.2 6.1-.8z"/>',
+  setup: '<path d="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1"/><circle cx="15" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/>',
+  audit: '<path d="M9 6h11M9 12h11M9 18h11"/><path d="M4.5 6h.01M4.5 12h.01M4.5 18h.01" stroke-width="3"/>',
+  monitor: '<rect x="3" y="4" width="18" height="12"/><path d="M8 20h8M12 16v4"/>',
+  more: '<path d="M5 12h.01M12 12h.01M19 12h.01" stroke-width="3.2"/>',
+  user: '<circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/>',
+};
+function icon(name) {
+  const s = document.createElement('span');
+  s.className = 'ico';
+  s.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[name] || ''}</svg>`; // constant strings only
+  return s;
+}
+
 // ============================================================ local storage (IndexedDB key/value)
 const dbHandles = {};
 function idb(name) {
@@ -368,14 +389,15 @@ function openModal(title, body, actions = []) {
 
 // ============================================================ routing & shell
 const ROUTES = {
-  results: { title: 'Results', roles: ['admin'], view: viewResults },
-  review: { title: 'Score review', roles: ['admin'], view: viewReview },
-  checkin: { title: 'Check-in', roles: ['admin', 'coordinator'], view: viewCheckin },
-  stage: { title: 'Stage', roles: ['admin', 'coordinator'], view: viewStage },
-  judge: { title: 'Scoring', roles: ['judge'], view: viewJudge },
-  setup: { title: 'Setup', roles: ['admin'], view: viewSetup },
-  audit: { title: 'Audit log', roles: ['admin'], view: viewAudit },
+  results: { title: 'Results', short: 'Results', icon: 'results', roles: ['admin'], view: viewResults },
+  checkin: { title: 'Check-in', short: 'Check-in', icon: 'checkin', roles: ['admin', 'coordinator'], view: viewCheckin },
+  stage: { title: 'Stage', short: 'Stage', icon: 'stage', roles: ['admin', 'coordinator'], view: viewStage },
+  review: { title: 'Score review', short: 'Review', icon: 'review', roles: ['admin'], view: viewReview },
+  judge: { title: 'Scoring', short: 'Scoring', icon: 'judge', roles: ['judge'], view: viewJudge },
+  setup: { title: 'Setup', short: 'Setup', icon: 'setup', roles: ['admin'], view: viewSetup },
+  audit: { title: 'Audit log', short: 'Audit', icon: 'audit', roles: ['admin'], view: viewAudit },
 };
+const TABS_MAX = 4; // bottom bar on phones: first 4 screens, the rest under "More"
 const HOME = { admin: 'results', coordinator: 'checkin', judge: 'judge' };
 const route = () => { const [name, ...args] = location.hash.replace(/^#\/?/, '').split('/'); return { name: name || '', args }; };
 
@@ -417,19 +439,30 @@ function render() {
     app.dataset.shell = role();
     app.replaceChildren(
       h('header.topbar',
-        h('div.brand', h('img', { src: 'icons/icon.svg', alt: '' }), h('span#ev-name', settings().name)),
+        h('div.brand', h('img', { src: 'icons/icon.svg', alt: '' }), h('div.grow', h('span.kicker', APP_NAME), h('span#ev-name', settings().name))),
         h('nav.nav#nav'),
-        h('div.sync#sync', { onclick: syncMenu, title: 'Sync status' }),
-        h('button.btn.ghost.sm', { onclick: accountMenu }, '👤 ', h('span#who'))),
-      h('main#view'));
+        h('div.topbar-right',
+          h('button.sync#sync', { onclick: syncMenu, title: 'Sync status' }),
+          h('button.userbtn', { onclick: accountMenu, title: 'Account' }, icon('user'), h('span.who#who')))),
+      h('main#view'),
+      h('nav.tabbar#tabbar'));
     view = $('#view');
   }
   $('#ev-name').textContent = settings().name;
   $('#who').textContent = S.account.user.displayName;
+  const monitorLink = role() !== 'judge';
   $('#nav').replaceChildren(...allowed.map(([k, v]) => h('a', { href: '#/' + k, class: k === r.name ? 'active' : '' }, v.title)),
-    ...(role() !== 'judge' ? [h('a', { href: '#/monitor', target: '_blank', title: 'Open the confidence monitor in a new window' }, 'Monitor ↗')] : []));
+    ...(monitorLink ? [h('a', { href: '#/monitor', target: '_blank', title: 'Open the confidence monitor in a new window' }, icon('monitor'), 'Monitor')] : []));
+  // Phones / portrait tablets: bottom tabs. One-screen roles (judges) get none.
+  const entries = [...allowed.map(([k, v]) => ({ k, ...v })), ...(monitorLink ? [{ k: 'monitor', short: 'Monitor', icon: 'monitor', ext: true }] : [])];
+  const tabs = entries.length > TABS_MAX + 1 ? entries.slice(0, TABS_MAX) : entries;
+  const extra = entries.slice(tabs.length);
+  document.body.classList.toggle('has-tabs', entries.length > 1);
+  $('#tabbar').replaceChildren(
+    ...tabs.map(e => h('a', { href: '#/' + e.k, class: e.k === r.name ? 'active' : '', target: e.ext ? '_blank' : null }, icon(e.icon), e.short)),
+    ...(extra.length ? [h('button', { class: extra.some(e => e.k === r.name) ? 'active' : '', onclick: () => moreSheet(extra, r.name) }, icon('more'), 'More')] : []));
   renderSync();
-  document.title = cur.title + ' · ' + settings().name;
+  document.title = cur.title + ' · ' + APP_NAME;
   stopTicker();
   view.replaceChildren(cur.view(...r.args));
 }
@@ -438,8 +471,14 @@ function renderSync() {
   const el = $('#sync');
   if (!el) return;
   const n = S.outbox.length;
-  const labels = { online: n ? `Syncing ${n}…` : 'Online', syncing: 'Connecting…', offline: n ? `Offline · ${n} unsynced` : 'Offline', auth: 'Sign in to sync' };
-  el.replaceChildren(h('span.dot', { class: S.net }), labels[S.net]);
+  const labels = { online: n ? `Syncing ${n}` : 'Online', syncing: 'Connecting', offline: n ? `Offline · ${n} unsynced` : 'Offline', auth: 'Sign in to sync' };
+  el.className = 'sync ' + S.net;
+  el.replaceChildren(...[h('span.dot'), h('span.lbl', labels[S.net]), n ? h('span.count', String(n)) : null].filter(Boolean));
+}
+function moreSheet(items, current) {
+  const close = openModal('More', h('div.sheet-list', items.map(e => h('a', {
+    href: '#/' + e.k, class: e.k === current ? 'active' : '', target: e.ext ? '_blank' : null, onclick: () => close(),
+  }, icon(e.icon), e.title || e.short))));
 }
 function syncMenu() {
   if (S.net === 'auth') return reauthModal();
@@ -518,7 +557,7 @@ async function renderLogin(app) {
   const recent = Object.values(accounts);
   app.dataset.shell = '';
   app.replaceChildren(h('div.login',
-    h('div.logo', h('img', { src: 'icons/icon.svg', alt: '' }), h('h1', 'Cosplay Judge')),
+    h('div.logo', h('img', { src: 'icons/icon.svg', alt: '' }), h('h1', APP_NAME), h('span.kicker', 'Cosplay contest judging')),
     h('form.panel.stack', {
       onsubmit: async e => {
         e.preventDefault(); err.textContent = ''; btn.disabled = true; btn.textContent = 'Signing in…';
@@ -552,7 +591,7 @@ function viewCheckin() {
     listEl.replaceChildren(...(rows.length ? rows.map(p => h('div.item', { onclick: () => editParticipant(p) },
       h('div.num', p.number || '–'),
       h('div.who', h('div.n', p.name || '(no name)', dupes[p.number] > 1 ? h('span.badge.no_show', { style: { marginLeft: '.5rem' } }, 'duplicate #') : null),
-        h('div.c', [p.character, p.series].filter(Boolean).join(' · ') || '—', p.division ? ' · ' + p.division : '')),
+        h('div.c', h('span.badge.mobile', { class: p.status || 'registered' }, (p.status || 'registered').replace('_', ' ')), [p.character, p.series].filter(Boolean).join(' · ') || '—', p.division ? ' · ' + p.division : '')),
       h('span.badge', { class: p.status || 'registered' }, (p.status || 'registered').replace('_', ' ')),
       p.checkedIn
         ? h('button.btn.sm.ghost', { onclick: e => { e.stopPropagation(); mutate('participants', p.id, { checkedIn: false, status: 'registered' }); } }, 'Undo')
@@ -687,7 +726,7 @@ function viewStage() {
   const warnMs = settings().warnSeconds * 1000;
   const clock = h('div.stage-clock');
   const bar = h('div'); const prog = h('div.progress', bar);
-  const stateLbl = h('div.muted');
+  const stateLbl = h('div.onstage-state');
   const tick = () => {
     const st = stage();
     const rem = remainingOf(st);
@@ -703,12 +742,12 @@ function viewStage() {
   const B = (label, fn, cls = '', dis = false) => h('button.btn.big', { class: cls, onclick: fn, disabled: dis }, label);
   const running = s.state === 'running';
   return h('div.grid.cols-stage',
-    h('div.panel', h('h2', 'Running order'),
+    h('div.panel', h('h3', 'Running order'),
       h('p.small.muted', 'Checked-in contestants. Tap a name to put them on stage.'),
       h('div.list', order.length ? order.map((p, i) => h('div.item', { class: (p.id === s.participantId ? 'sel ' : '') + (p.status === 'done' ? 'dim' : '') },
         h('div.num', p.number || '–'),
         h('div.who', { onclick: () => { if (p.id !== s.participantId) putOnStage(p.id); } }, h('div.n', p.name),
-          h('div.c', p.id === s.nextParticipantId && p.id !== s.participantId ? h('span.badge.draft', 'next') : h('span.badge', { class: p.status }, p.status.replace('_', ' ')), ' ', [p.character, p.division].filter(Boolean).join(' · '))),
+          h('div.c', p.id === s.nextParticipantId && p.id !== s.participantId ? h('span.badge.next', 'next') : h('span.badge', { class: p.status }, p.status.replace('_', ' ')), ' ', [p.character, p.division].filter(Boolean).join(' · '))),
         h('div.tools',
           h('button.btn.sm.ghost', { title: 'Set as next', onclick: () => stageSet({ nextParticipantId: p.id }) }, '⏭'),
           h('button.btn.sm.ghost', { title: 'Move up', disabled: i === 0, onclick: () => reorder(order, i, -1) }, '↑'),
@@ -716,10 +755,10 @@ function viewStage() {
         : h('p.muted', 'Nobody checked in yet.'))),
     h('div.stack',
       h('div.panel.stack',
-        h('div.row.between', h('div', h('div.small.muted', 'ON STAGE'), h('h2', { style: { margin: 0 } }, cur ? partLabel(cur) : '—'),
+        h('div.row.between', h('div', h('span.kicker', 'On stage'), h('h2', { style: { margin: 0 } }, cur ? partLabel(cur) : '—'),
           cur ? h('div.muted', [cur.character, cur.series, cur.division].filter(Boolean).join(' · ')) : null),
         h('a.btn', { href: '#/monitor', target: '_blank' }, 'Open monitor ↗')),
-        cur?.notes ? h('div.banner.warn', '📝 ', cur.notes) : null,
+        cur?.notes ? h('div.banner.warn', h('span.tag', 'Staff note'), h('span.grow', cur.notes)) : null,
         clock, prog, stateLbl,
         h('div.controls',
           running ? B('⏸ Pause', stageAct.pause, 'warn') : B(s.state === 'paused' ? '▶ Resume' : '▶ Start', stageAct.start, 'ok', !cur || s.state === 'finished'),
@@ -840,11 +879,11 @@ function viewJudge() {
   const locked = !!st.scoresLocked;
 
   return h('div',
-    locked ? h('div.banner.bad', '🔒 Scoring is locked by the admin. Your scores are read-only.') : null,
-    onStage && onStage.id !== ui.judgeSel ? h('div.banner.stage', h('div.grow', h('b', 'On stage now: '), partLabel(onStage), onStage.character ? ` — ${onStage.character}` : ''),
+    locked ? h('div.banner.bad', h('span.tag', 'Locked'), 'Scoring is locked by the admin. Your scores are read-only.') : null,
+    onStage && onStage.id !== ui.judgeSel ? h('div.banner.stage', h('span.tag', 'On stage'), h('div.grow', h('b', partLabel(onStage)), onStage.character ? ` — ${onStage.character}` : ''),
       h('button.btn.primary', { onclick: () => { ui.judgeSel = onStage.id; render(); } }, 'Score now')) : null,
     h('div.grid.cols-2',
-      h('div.panel', h('div.row.between', h('h2', 'Contestants'), h('span.muted.small', `${scored}/${list.length} submitted`)),
+      h('div.panel', h('div.row.between', h('h3', 'Contestants'), h('span.muted.small', `${scored}/${list.length} submitted`)),
         h('div.list', list.length ? list.map(p => {
           const sc = S.data.scores[scoreId(p.id)];
           const live = sc && !sc.deleted;
@@ -852,7 +891,7 @@ function viewJudge() {
             h('div.num', p.number || '–'),
             h('div.who', h('div.n', p.name), h('div.c', [p.character, p.division].filter(Boolean).join(' · '))),
             p.id === stg.participantId ? h('span.badge.on_stage', 'on stage') : null,
-            live && sc.submitted ? h('span.badge.submitted', '✓ ' + fmt1(scoreTotal(sc, crits).total)) : live && scoreTotal(sc, crits).filled ? h('span.badge.draft', 'draft') : null);
+            live && sc.submitted ? h('span.badge.submitted', 'Done ' + fmt1(scoreTotal(sc, crits).total)) : live && scoreTotal(sc, crits).filled ? h('span.badge.draft', 'draft') : null);
         }) : h('p.muted', 'Contestants appear here once they are checked in.'))),
       sel ? scoreForm(sel, crits, locked) : h('div.panel.muted', 'Pick a contestant to score.')));
 }
@@ -866,10 +905,10 @@ function scoreForm(p, crits, locked) {
   const comment = h('textarea', { rows: 3, placeholder: 'Private notes / feedback (optional)', disabled: locked, oninput: debounce(e => set({ comment: e.target.value }), 400) }, live?.comment || '');
 
   return h('div.panel',
-    h('div.row.between', h('div', h('div.small.muted', p.division || ''), h('h2', { style: { margin: 0 } }, partLabel(p)),
+    h('div.row.between', h('div', h('span.kicker', p.division || 'Contestant'), h('h2', { style: { margin: 0 } }, partLabel(p)),
       h('div.muted', [p.character, p.series].filter(Boolean).join(' — '))),
     live?.submitted ? h('span.badge.submitted', 'Submitted') : live ? h('span.badge.draft', 'Draft — saved on device') : null),
-    p.judgeNotes ? h('div.banner', { style: { marginTop: '.75rem' } }, '📋 ', p.judgeNotes) : null,
+    p.judgeNotes ? h('div.banner.info', { style: { marginTop: '.75rem' } }, h('span.tag', 'Build notes'), h('span.grow', p.judgeNotes)) : null,
     sc?.deleted ? h('div.banner.warn', 'An admin cleared your earlier score for this contestant.') : null,
     crits.map(c => {
       const v = live?.values?.[c.id];
@@ -931,14 +970,13 @@ function viewResults() {
   const subCount = Object.values(S.data.scores).filter(s => s.submitted && !s.deleted).length;
   const best = rows.filter(r => r.avg != null).sort((a, b) => b.avg - a.avg)[0];
   const divOrder = [...(st.divisions || []), ...Object.keys(byDiv).filter(d => !(st.divisions || []).includes(d))].filter(d => byDiv[d]);
-  const medal = r => r.rank === 1 ? '🥇' : r.rank === 2 ? '🥈' : r.rank === 3 ? '🥉' : '';
 
   return h('div.stack',
     h('div.tiles',
       h('div.tile', h('div.v', checkedIn), h('div.l', 'Checked in')),
       h('div.tile', h('div.v', `${fully}/${rows.filter(r => r.p.checkedIn || r.n).length}`), h('div.l', `Scored by all ${judgeCount} judges`)),
       h('div.tile', h('div.v', subCount), h('div.l', 'Score sheets submitted')),
-      h('div.tile', h('div.v', st.scoresLocked ? '🔒' : '🔓'), h('div.l', st.scoresLocked ? 'Scoring locked' : 'Scoring open'))),
+      h('div.tile', { class: st.scoresLocked ? 'on' : '' }, h('div.v.word', st.scoresLocked ? 'Locked' : 'Open'), h('div.l', 'Scoring'))),
     h('div.panel.row.between.no-print',
       h('div.row',
         h('button.btn', { class: st.scoresLocked ? '' : 'warn', onclick: () => { if (confirm(st.scoresLocked ? 'Unlock scoring so judges can edit again?' : 'Lock scoring? Judges will no longer be able to change scores.')) mutate('settings', 'event', { scoresLocked: !st.scoresLocked }); } }, st.scoresLocked ? 'Unlock scoring' : 'Lock scoring'),
@@ -946,14 +984,14 @@ function viewResults() {
       h('div.row',
         h('button.btn', { onclick: () => window.print() }, 'Print'),
         h('button.btn', { onclick: () => exportResults(byDiv, crits) }, 'Export CSV'))),
-    best ? h('div.panel', h('div.small.muted', 'HIGHEST OVERALL SCORE'), h('h2', { style: { margin: '.2rem 0' } }, '🏆 ', partLabel(best.p)),
+    best ? h('div.panel.accent', h('span.kicker', 'Highest overall score'), h('h2', { style: { margin: '.2rem 0' } }, partLabel(best.p)),
       h('div.muted', [best.p.character, best.p.series, best.p.division].filter(Boolean).join(' · '), ` — ${fmt1(best.avg)} / ${max}`)) : null,
     divOrder.length ? divOrder.map(div => h('div.panel',
-      h('h2', div),
+      h('h3', div),
       h('div.table-wrap', h('table',
         h('thead', h('tr', h('th', 'Rank'), h('th', '#'), h('th', 'Contestant'), h('th.r', 'Judges'), crits.map(c => h('th.r', { title: c.name }, c.name.split(/[ /]/)[0])), h('th.r', 'Average'), h('th.r', '%'))),
         h('tbody', byDiv[div].map(r => h('tr.click', { onclick: () => { location.hash = '#/review/' + r.p.id; } },
-          h('td', r.rank ? h('span', h('b', r.rank), ' ', h('span.medal', medal(r)), r.tie ? h('span.badge.tie', { style: { marginLeft: '.3rem' } }, 'tie') : null) : h('span.muted', '—')),
+          h('td', r.rank ? h('span', h('span.rank', { class: r.rank <= 3 ? 'r' + r.rank : '' }, r.rank), r.tie ? h('span.badge.tie', { style: { marginLeft: '.4rem' } }, 'tie') : null) : h('span.muted', '—')),
           h('td.mono', r.p.number),
           h('td', h('div', r.p.name), h('div.small.muted', r.p.character || '')),
           h('td.r', { style: { color: r.n < judgeCount ? 'var(--warn)' : '' } }, `${r.n}/${judgeCount}`),
@@ -987,7 +1025,7 @@ function viewReview(pid) {
       h('div.num', x.number || '–'), h('div.who', h('div.n', x.name), h('div.c', x.character || '')), h('span.badge', n === 1 ? '1 sheet' : n + ' sheets'));
   }));
   return h('div.grid.cols-2',
-    h('div.panel.stack', h('h2', 'Contestants'), search, listEl),
+    h('div.panel.stack', h('h3', 'Contestants'), search, listEl),
     p ? reviewDetail(p) : h('div.panel.muted', 'Select a contestant to see every judge\'s sheet.'));
 }
 
@@ -1083,7 +1121,7 @@ function viewAudit() {
     listEl.replaceChildren(...(items.length ? items.map(x => x.node) : [h('p.muted', 'Nothing logged yet.')]));
   };
   draw();
-  return h('div.panel.stack', h('div.row.between', h('h2', 'Audit log'), h('span.muted.small', all.length + ' entries')),
+  return h('div.panel.stack', h('div.row.between', h('h3', 'Audit log'), h('span.muted.small', all.length + ' entries')),
     h('input', { type: 'search', placeholder: 'Filter (name, judge, action)…', value: ui.auditQ, oninput: e => { ui.auditQ = e.target.value; draw(); } }), listEl);
 }
 
@@ -1100,7 +1138,7 @@ function viewSetup() {
   const online = S.net === 'online';
 
   return h('div.stack',
-    h('div.panel.stack', h('h2', 'Event'),
+    h('div.panel.stack', h('h3', 'Event'),
       h('div.form-grid',
         h('label.field', h('span', 'Event name'), name),
         h('label.field', h('span', 'Stage time per contestant (seconds)'), secs),
@@ -1114,9 +1152,9 @@ function viewSetup() {
         },
       }, 'Save event settings'))),
 
-    h('div.panel.stack', h('h2', 'Judging criteria'),
+    h('div.panel.stack', h('h3', 'Judging criteria'),
       h('p.small.muted', 'Each judge scores every criterion from 0 to its max. Weight multiplies that criterion in the total. Changing criteria after judging starts affects every total — lock in before the show.'),
-      h('div.table-wrap', h('table',
+      h('div.table-wrap', h('table.edit-table',
         h('thead', h('tr', h('th', 'Order'), h('th', 'Name'), h('th', 'Description'), h('th', 'Max'), h('th', 'Weight'), h('th', ''))),
         h('tbody', crits.map(c => {
           const upd = (k, conv = x => x) => e => mutate('criteria', c.id, { [k]: conv(e.target.value) });
@@ -1130,17 +1168,17 @@ function viewSetup() {
         })))),
       h('div', h('button.btn', { onclick: () => mutate('criteria', newId(), { name: 'New criterion', description: '', max: 10, weight: 1, order: (crits.at(-1)?.order ?? 0) + 1 }) }, '+ Add criterion'))),
 
-    h('div.panel.stack', h('div.row.between', h('h2', 'Accounts'), online ? null : h('span.badge.draft', 'Needs connection')),
+    h('div.panel.stack', h('div.row.between', h('h3', 'Accounts'), online ? null : h('span.badge.draft', 'Needs connection')),
       h('p.small.muted', 'Admins see everything. Coordinators get check-in, stage control and the monitor. Judges only see the scoring screen and their own scores.'),
       usersTable(online)),
 
-    h('div.panel.stack', h('h2', 'Import contestants'),
+    h('div.panel.stack', h('h3', 'Import contestants'),
       h('p.small.muted', 'Paste rows from a spreadsheet or choose a CSV file. First row must be headers. Recognised columns: number, name, character, series, division, judge notes, notes, contact, checked in.'),
       importBox()),
 
     githubPanel(online),
 
-    h('div.panel.stack', h('h2', 'Downloads'),
+    h('div.panel.stack', h('h3', 'Downloads'),
       h('div.row',
         h('button.btn', { onclick: () => download('contestant-template.csv', 'number,name,character,series,division,judge notes,notes,contact\n1,Jane Doe,Aloy,Horizon Zero Dawn,Novice,"EVA foam bow, 3D printed focus",Needs ramp,jane@example.com\n') }, 'Download CSV template'),
         h('button.btn', {
@@ -1166,7 +1204,7 @@ function githubPanel(online) {
       h('div.tiles',
         h('div.tile', h('div.v', { style: { fontSize: '1.1rem' } }, st.lastPushAt ? fmtTime(st.lastPushAt) : 'never'), h('div.l', 'Last copied to GitHub')),
         h('div.tile', h('div.v', { style: { fontSize: '1.1rem', color: pending ? 'var(--warn)' : 'var(--ok)' } }, pending ? 'Changes waiting' : 'Up to date'), h('div.l', 'GitHub copy'))),
-      st.lastError && (!st.lastPushAt || st.lastErrorAt > st.lastPushAt) ? h('div.banner.bad', '⚠ Last attempt failed: ', st.lastError) : null,
+      st.lastError && (!st.lastPushAt || st.lastErrorAt > st.lastPushAt) ? h('div.banner.bad', h('span.tag', 'Failed'), h('span.grow', st.lastError)) : null,
       h('div.row',
         h('button.btn', { disabled: !st.configured, onclick: async () => { try { draw(await call('POST', { action: 'push' })); toast('Copied to GitHub', 'ok'); } catch (e) { toast(e.message, 'bad'); } } }, 'Copy to GitHub now'),
         h('button.btn.danger', {
@@ -1179,7 +1217,7 @@ function githubPanel(online) {
         }, 'Restore from GitHub…'))].filter(Boolean));
   };
   if (online) call('GET').then(draw).catch(e => body.replaceChildren(h('p.small', { style: { color: 'var(--bad)' } }, e.message)));
-  return h('div.panel.stack', h('h2', 'GitHub data copy'), body);
+  return h('div.panel.stack', h('h3', 'GitHub data copy'), body);
 }
 
 function usersTable(online) {
@@ -1196,7 +1234,7 @@ function usersTable(online) {
     role: h('select', { onchange: keep('role') }, ['judge', 'coordinator', 'admin'].map(r => h('option', { value: r, selected: d.role === r }, r))),
   };
   return h('div.stack',
-    h('div.table-wrap', h('table',
+    h('div.table-wrap', h('table.edit-table',
       h('thead', h('tr', h('th', 'Name'), h('th', 'Username'), h('th', 'Role'), h('th', 'Status'), h('th', ''))),
       h('tbody', users.map(u => h('tr', { style: { opacity: u.active ? 1 : .5 } },
         h('td', u.displayName), h('td.mono', u.username),
