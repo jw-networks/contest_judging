@@ -24,9 +24,12 @@ fs.mkdirSync(path.join(DATA, 'github'), { recursive: true });
 
 // ---------- fake Durable Object storage (persisted to a JSON file)
 const storeFile = path.join(DATA, 'storage.json');
-const mem = new Map(fs.existsSync(storeFile) ? Object.entries(JSON.parse(fs.readFileSync(storeFile, 'utf8'))) : []);
+// Binary values (photos) are saved as {__u8: base64} so they survive the JSON file.
+const revive = (k, v) => (v && typeof v === 'object' && typeof v.__u8 === 'string' ? new Uint8Array(Buffer.from(v.__u8, 'base64')) : v);
+const replace = (k, v) => (v instanceof Uint8Array ? { __u8: Buffer.from(v).toString('base64') } : v);
+const mem = new Map(fs.existsSync(storeFile) ? Object.entries(JSON.parse(fs.readFileSync(storeFile, 'utf8'), revive)) : []);
 let alarmTimer = null, alarmAt = null;
-const persist = () => fs.writeFileSync(storeFile, JSON.stringify(Object.fromEntries(mem)));
+const persist = () => fs.writeFileSync(storeFile, JSON.stringify(Object.fromEntries(mem), replace));
 const clone = v => (v === undefined ? undefined : structuredClone(v));
 const sockets = new Set();
 let chain = Promise.resolve();

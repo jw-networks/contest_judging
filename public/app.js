@@ -84,6 +84,9 @@ const ICONS = {
   more: '<path d="M5 12h.01M12 12h.01M19 12h.01" stroke-width="3.2"/>',
   user: '<circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/>',
   admin: '<path d="M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6z"/><path d="M9 12l2 2 4-4"/>',
+  tech: '<path d="M4 18V6M9 18V9M14 18V4M19 18v-7"/><path d="M2.5 15h3M7.5 12h3M12.5 8h3M17.5 14h3"/>',
+  emcee: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3M8 21h8"/>',
+  photo: '<rect x="3" y="5" width="18" height="15"/><circle cx="12" cy="12.5" r="3.5"/><path d="M8 5l1.5-2h5L16 5"/>',
   caret: '<path d="M7 10l5 5 5-5"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
 };
@@ -231,8 +234,17 @@ async function api(path, body, { method, token, timeout = 12000 } = {}) {
   } finally { clearTimeout(timer); }
 }
 
+function purgeContestLocal(cid) {
+  for (const p of Object.values(S.data.participants)) if (p.contestId === cid && p.photos) forgetPhotos(p.photos);
+  for (const coll of ['criteria', 'participants', 'scores', 'audit']) for (const [k, r] of Object.entries(S.data[coll])) if (r.contestId === cid) delete S.data[coll][k];
+  delete S.data.stage[cid];
+  if (ui.contestId === cid) ui.contestId = null;
+}
 function applyServerRecord(coll, rec) {
   if (!S.data[coll]) S.data[coll] = {};
+  const prev = S.data[coll][rec.id];
+  if (coll === 'participants' && prev?.photos) { const gone = prev.photos.filter(x => !(rec.photos || []).includes(x)); if (gone.length) forgetPhotos(gone); }
+  if (coll === 'contests' && rec.deleted && !prev?.deleted) purgeContestLocal(rec.id);
   let local = rec;
   for (const o of S.outbox) if (o.coll === coll && o.id === rec.id) local = mergePatch(coll, local, o.patch);
   S.data[coll][rec.id] = local;
@@ -284,6 +296,7 @@ async function sync({ full = false } = {}) {
     if (S.account.user.mustChangePassword) forcePasswordChange();
     persist();
     if (res.changes.length || res.results.some(r => !r.ok) || full || res.reset) scheduleRender();
+    if (full || res.reset) clearPhotoCache().then(prefetchPhotos); else if (res.changes.some(c => c.coll === 'participants')) prefetchPhotos();
     if (accessChanged || schemaChanged || (needFull && !full)) {
       if (accessChanged) toast('Your contest access was updated');
       // Re-pull everything: drops data you can no longer see, and anything rejected.
@@ -390,6 +403,7 @@ async function logout() {
   await saveAccount({ ...acc, token: null });
   await kv(DEVICE_DB, 'active', null);
   S.account = null; S.data = EMPTY(); S.outbox = []; S.rev = 0;
+  clearPhotoCache().catch(() => {}); // shared tablets: the next person re-downloads only what they may see
   location.hash = '#/login';
   render();
 }
@@ -435,6 +449,8 @@ const ROUTES = {
   stage: { title: 'Stage', short: 'Stage', icon: 'stage', roles: ['admin', 'lead', 'coordinator'], cosplay: true, view: viewStage },
   review: { title: 'Score review', short: 'Review', icon: 'review', roles: ['admin', 'lead'], view: viewReview },
   judge: { title: 'Scoring', short: 'Scoring', icon: 'judge', roles: ['judge'], view: viewJudge },
+  tech: { title: 'Tech booth', short: 'Tech', icon: 'tech', roles: ['tech', 'admin', 'lead', 'coordinator'], navFor: ['tech'], cosplay: true, view: () => viewShow('tech') },
+  emcee: { title: 'Emcee', short: 'Emcee', icon: 'emcee', roles: ['emcee', 'admin', 'lead', 'coordinator'], navFor: ['emcee'], cosplay: true, view: () => viewShow('emcee') },
   setup: { title: 'Contest setup', short: 'Setup', icon: 'setup', roles: ['admin', 'lead'], view: viewSetup },
   audit: { title: 'Audit log', short: 'Audit', icon: 'audit', roles: ['admin', 'lead'], view: viewAudit },
   admin: { title: 'Admin', short: 'Admin', icon: 'admin', global: true, view: viewAdmin },
@@ -443,7 +459,9 @@ const TABS_MAX = 4; // bottom bar on phones: first 4 screens, the rest under "Mo
 function routeAllowed(v) { return v.global ? isAdmin() : (!!curId() && v.roles.includes(role()) && !(v.cosplay && isMakers())); }
 function home() {
   if (!curId()) return isAdmin() ? 'admin' : 'none';
-  return { admin: 'results', lead: 'results', viewer: 'results', coordinator: 'checkin', judge: 'judge' }[role()] || 'none';
+  const r = role();
+  if ((r === 'tech' || r === 'emcee') && isMakers()) return 'none';
+  return { admin: 'results', lead: 'results', viewer: 'results', coordinator: 'checkin', judge: 'judge', tech: 'tech', emcee: 'emcee' }[r] || 'none';
 }
 const route = () => { const [name, ...args] = location.hash.replace(/^#\/?/, '').split('/'); return { name: name || '', args }; };
 
@@ -483,7 +501,7 @@ function render() {
     return;
   }
   if (!r.name || (r.name === 'none' && curId())) { location.hash = '#/' + home(); return; }
-  const allowed = Object.entries(ROUTES).filter(([, v]) => routeAllowed(v));
+  const allowed = Object.entries(ROUTES).filter(([, v]) => routeAllowed(v) && (!v.navFor || v.navFor.includes(role())));
   const cur = r.name === 'none' ? { title: 'Welcome', view: viewNoContest } : ROUTES[r.name];
   if (!cur || (r.name !== 'none' && !routeAllowed(cur))) { location.hash = '#/' + home(); return; }
 
@@ -525,7 +543,7 @@ function render() {
     $('#brand-kicker').classList.remove('hidden');
   }
   $('#who').textContent = S.account.user.displayName;
-  const monitorLink = !!curId() && !isMakers() && !['judge', 'viewer'].includes(role());
+  const monitorLink = !!curId() && !isMakers() && !['judge', 'viewer', 'emcee'].includes(role());
   const monHref = '#/monitor/' + curId();
   // Desktop nav: short names; Admin and Monitor as compact icons (with tooltips) so everything fits beside the picker.
   const contestTabs = allowed.filter(([k]) => k !== 'admin');
@@ -711,6 +729,7 @@ function nextNumber() {
 // Fields per contest type: [key, label, placeholder]
 const PART_FIELDS = {
   cosplay: [['number', 'Contestant #'], ['name', 'Name (as announced)', 'Badge / cosplay name'], ['character', 'Character'], ['series', 'Series / source']],
+  show: [['music', 'Music & sound cue', 'Track name, start at 0:42, fade at end…'], ['lighting', 'Lighting notes', 'Blue wash, blackout on final pose…'], ['pronunciation', 'Name pronunciation', 'e.g. AL-iss mo-ROH']],
   makers: [['number', 'Entry #'], ['title', 'Entry title', 'e.g. Mjolnir replica'], ['name', 'Maker', 'Name as credited'], ['materials', 'Materials & techniques', 'EVA foam, resin, 3D printing…']],
 };
 function editParticipant(p) {
@@ -726,15 +745,19 @@ function editParticipant(p) {
   const checkIn = h('input', { type: 'checkbox', checked: isNew ? true : !!p.checkedIn });
   const statuses = isMakers() ? ['registered', 'checked_in', 'done', 'no_show'] : ['registered', 'checked_in', 'on_stage', 'done', 'no_show'];
   const status = h('select', statuses.map(s2 => h('option', { value: s2, selected: (p.status || 'registered') === s2 }, s2.replace('_', ' '))));
-  const keys = [...PART_FIELDS[type].map(x => x[0]), 'division', 'judgeNotes', 'notes', 'contact'];
+  const keys = [...PART_FIELDS[type].map(x => x[0]), 'division', 'judgeNotes', 'notes', 'contact', ...(isMakers() ? [] : ['music', 'lighting', 'pronunciation', 'intro'])];
   const close = openModal(isNew ? `Add ${W.one}` : `Edit ${partLabel(p)}`, h('div.stack',
     h('div.form-grid',
       PART_FIELDS[type].map(([k, label, ph]) => field(k, label, inp(k, ph))),
       field('division', W.division, h('select', h('option', { value: '' }, '—'), (st.divisions || []).map(d => h('option', { value: d, selected: p.division === d }, d)))),
       isNew ? null : field('status', 'Status', status)),
     field('judgeNotes', isMakers() ? 'Notes shown to judges (build log, techniques, references)' : 'Notes shown to judges (build notes, references)', ta('judgeNotes')),
-    field('notes', isMakers() ? 'Private staff notes (table number, fragile, pickup time…) — not shown to judges' : 'Private staff notes (accessibility, music cue…) — not shown to judges', ta('notes')),
+    field('notes', isMakers() ? 'Private staff notes (table number, fragile, pickup time…) — not shown to judges' : 'Private staff notes (accessibility, special needs…) — not shown to judges', ta('notes')),
     field('contact', 'Contact (private)', inp('contact', 'Phone or email')),
+    isMakers() ? null : h('div.stack', h('h3', 'For tech & emcee'),
+      h('div.form-grid', PART_FIELDS.show.map(([k, label, ph]) => field(k, label, inp(k, ph)))),
+      field('intro', 'Emcee intro (read on stage)', ta('intro'))),
+    isNew ? h('div.small.muted', 'Save first, then open the entry again to add reference photos.') : photoEditor(p),
     isNew ? h('label.check', checkIn, 'Checked in now') : null),
   [
     !isNew && manages() ? h('button.btn.danger', { onclick: () => { if (confirm(`Delete ${partLabel(p)}? Their scores will be hidden from results.`)) { mutate('participants', p.id, { deleted: true }); close(); } } }, 'Delete') : null,
@@ -863,6 +886,9 @@ function viewStage() {
           B('Next contestant →', stageAct.next, 'primary')),
         h('div.row.between', h('div.muted', 'Up next: ', h('b', nxt ? partLabel(nxt) : '—'), nxt?.character ? ` (${nxt.character})` : ''),
           cur ? h('button.btn.sm.ghost', { onclick: stageAct.clear }, 'Clear stage') : null)),
+      h('div.panel.row', h('span.small.muted.grow', 'Screens for the crew (open on their device, or share the link):'),
+        h('a.btn.sm', { href: '#/tech', target: '_blank' }, icon('tech'), 'Tech view'),
+        h('a.btn.sm', { href: '#/emcee', target: '_blank' }, icon('emcee'), 'Emcee view')),
       h('div.panel.small.muted', `Stage time per contestant: ${settings().stageSeconds}s · warning at ${settings().warnSeconds}s (change in Contest setup). `,
         'The monitor works on this device even offline; on other devices it needs the server.')));
 }
@@ -969,6 +995,175 @@ function goFullscreen() {
 }
 async function requestWakeLock() { try { await navigator.wakeLock?.request('screen'); } catch { /* not supported */ } }
 
+// ============================================================ tech booth & emcee (read-only, follow the live stage)
+function viewShow(kind) {
+  const isTech = kind === 'tech';
+  const s = stage();
+  const cur = S.data.participants[s.participantId];
+  const nxt = S.data.participants[s.nextParticipantId];
+  const order = runOrder().filter(p => p.status !== 'no_show');
+  const upcoming = order.filter(p => p.status !== 'done' && p.id !== s.participantId);
+  const offline = S.net === 'offline' || S.net === 'auth';
+  const fld = (label, val, cls = '') => h('div.show-field', { class: cls }, h('span.kicker', label), h('div.v', val || h('span.muted', '—')));
+  const details = (p, big) => !p ? null : isTech
+    ? h('div.show-fields', fld('Music & sound', p.music, big ? 'big' : ''), fld('Lighting', p.lighting, big ? 'big' : ''))
+    : h('div.show-fields', fld('Say it', p.pronunciation, big ? 'big' : ''), fld('Intro', p.intro, 'intro' + (big ? ' big' : '')));
+  const clock = h('div.stage-clock.show-clock');
+  const stateLbl = h('div.onstage-state');
+  if (isTech) {
+    const warnMs = settings().warnSeconds * 1000;
+    const tick = () => {
+      const st = stage(); const rem = remainingOf(st);
+      clock.textContent = st.participantId ? fmtClock(rem) : '';
+      clock.className = 'stage-clock show-clock ' + (rem <= 0 && !['ready', 'idle'].includes(st.state) ? 'over' : rem <= warnMs && st.state !== 'idle' ? 'warn' : '');
+    };
+    tick(); ticker = setInterval(tick, 250);
+  }
+  stateLbl.textContent = { idle: 'Stage empty', ready: 'Standing by', running: 'Live', paused: 'Paused', finished: 'Finished' }[s.state] || '';
+  return h('div.stack',
+    offline ? h('div.banner.warn', h('span.tag', 'Offline'), h('span.grow', 'Showing the last stage update this device received. It catches up as soon as it reconnects.')) : null,
+    h('div.grid.cols-show',
+      h('div.panel.accent.show-now',
+        h('div.row.between', h('span.kicker', 'On stage now'), stateLbl),
+        cur ? h('div', h('h2.show-name', partLabel(cur)), h('div.muted', partSub(cur))) : h('h2.show-name.muted', 'Nobody on stage'),
+        isTech ? clock : null,
+        details(cur, true)),
+      h('div.panel.show-next',
+        h('span.kicker', 'Up next'),
+        nxt ? h('div', h('h3.show-next-name', partLabel(nxt)), h('div.small.muted', partSub(nxt))) : h('p.muted', '—'),
+        details(nxt, false))),
+    h('div.panel', h('h3', 'Running order'),
+      upcoming.length ? h('div.list', upcoming.map(p => h('div.item', { style: { cursor: 'default' }, class: p.id === s.nextParticipantId ? 'sel' : '' },
+        h('div.num', p.number || '–'),
+        h('div.who', h('div.n', p.name), h('div.c', isTech ? [p.music, p.lighting].filter(Boolean).join(' · ') || 'No cues entered' : (p.pronunciation ? 'Say: ' + p.pronunciation : p.character || ''))),
+        p.id === s.nextParticipantId ? h('span.badge.next', 'next') : null)))
+        : h('p.muted', 'Nobody left in the running order.')),
+    h('p.small.muted', isTech ? 'Cues are entered by coordinators at check-in. This screen updates on its own as the stage moves.' : 'Intros and pronunciations are entered by coordinators at check-in. This screen updates on its own as the stage moves.'));
+}
+
+// ============================================================ reference photos
+const photoMem = new Map(); // id -> object URL
+async function photoUrl(id) {
+  if (photoMem.has(id)) return photoMem.get(id);
+  let blob = await kv('cj-photos', id).catch(() => null);
+  if (!blob) {
+    if (!S.account?.token) throw new Error('offline');
+    const res = await fetch(serverBase() + '/api/photos/' + encodeURIComponent(id), { headers: { Authorization: 'Bearer ' + S.account.token } });
+    if (!res.ok) throw new Error('missing');
+    blob = await res.blob();
+    kv('cj-photos', id, blob).catch(() => {});
+  }
+  const url = URL.createObjectURL(blob);
+  photoMem.set(id, url);
+  return url;
+}
+function forgetPhotos(ids) {
+  for (const id of ids) {
+    const u = photoMem.get(id); if (u) URL.revokeObjectURL(u);
+    photoMem.delete(id);
+    kv('cj-photos', id, null).catch(() => {});
+  }
+}
+async function clearPhotoCache() {
+  for (const u of photoMem.values()) URL.revokeObjectURL(u);
+  photoMem.clear();
+  const d = await idb('cj-photos').catch(() => null);
+  if (d) d.transaction('kv', 'readwrite').objectStore('kv').clear();
+}
+let prefetching = false;
+async function prefetchPhotos() {
+  // Download photos of everything this device can see, so judges have them offline at the table.
+  if (prefetching || S.net !== 'online' || !S.account?.token) return;
+  prefetching = true;
+  try {
+    const ids = Object.values(S.data.participants).filter(p => !p.deleted && !p.hidden).flatMap(p => p.photos || []);
+    for (const id of ids) {
+      if (photoMem.has(id) || await kv('cj-photos', id).catch(() => null)) continue;
+      await photoUrl(id).catch(() => {});
+      if (S.net !== 'online') break;
+    }
+  } finally { prefetching = false; }
+}
+function thumb(id, onclick) {
+  const img = h('img', { alt: 'Reference photo' });
+  const b = h('button.thumb', { type: 'button', onclick, title: 'View photo' }, img);
+  photoUrl(id).then(u => { img.src = u; }).catch(() => { b.classList.add('missing'); b.title = 'Photo not available offline yet'; });
+  return b;
+}
+function photoStrip(p) {
+  const ids = p.photos || [];
+  return ids.length ? h('div.photo-strip', ids.map((id, i) => thumb(id, () => lightbox(ids, i)))) : null;
+}
+function lightbox(ids, i) {
+  const img = h('img', { alt: 'Reference photo' });
+  const counter = h('span.kicker');
+  const show = () => { counter.textContent = `${i + 1} / ${ids.length}`; img.removeAttribute('src'); photoUrl(ids[i]).then(u => { img.src = u; }).catch(() => {}); };
+  const step = d => e => { e.stopPropagation(); i = (i + d + ids.length) % ids.length; show(); };
+  const back = h('div.lightbox', { onclick: e => { if (e.target === back || e.target === img) back.remove(); } }, img,
+    h('div.lb-bar', ids.length > 1 ? h('button.btn.sm', { onclick: step(-1) }, '←') : null, counter, ids.length > 1 ? h('button.btn.sm', { onclick: step(1) }, '→') : null,
+      h('button.btn.sm.primary', { onclick: () => back.remove() }, 'Close')));
+  show();
+  document.body.appendChild(back);
+}
+async function shrinkImage(file, max = 1600) {
+  const bmp = await createImageBitmap(file).catch(() => null);
+  if (!bmp) return file; // unknown format: let the server decide
+  const k = Math.min(1, max / Math.max(bmp.width, bmp.height));
+  const c = document.createElement('canvas');
+  c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+  c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+  return await new Promise(r => c.toBlob(r, 'image/jpeg', 0.82));
+}
+async function uploadPhoto(pid, file) {
+  const blob = await shrinkImage(file);
+  const res = await fetch(serverBase() + '/api/photos?participant=' + encodeURIComponent(pid), {
+    method: 'POST', headers: { 'Content-Type': blob.type || 'image/jpeg', Authorization: 'Bearer ' + S.account.token }, body: blob,
+  });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(d.error || 'Upload failed');
+  return d;
+}
+function photoEditor(p) {
+  const wrap = h('div.stack');
+  const draw = () => {
+    const cur = S.data.participants[p.id] || p;
+    const ids = cur.photos || [];
+    const online = S.net === 'online';
+    const status = h('span.small.muted');
+    const input = h('input.hidden', {
+      type: 'file', accept: 'image/*', multiple: true,
+      onchange: async e => {
+        const files = [...e.target.files].slice(0, 8 - ids.length);
+        for (const [n, f] of files.entries()) {
+          status.textContent = `Uploading ${n + 1} of ${files.length}…`;
+          try { const r = await uploadPhoto(p.id, f); if (S.data.participants[p.id]) S.data.participants[p.id].photos = r.photos; }
+          catch (err) { toast(err.message || 'Upload failed', 'bad'); break; }
+        }
+        sync(); draw();
+      },
+    });
+    wrap.replaceChildren(h('h3', 'Reference photos'),
+      ids.length ? h('div.photo-strip', ids.map((id, i) => h('div.thumb-wrap', thumb(id, () => lightbox(ids, i)),
+        h('button.thumb-del', {
+          type: 'button', title: 'Remove photo', disabled: !online,
+          onclick: async () => {
+            if (!confirm('Remove this photo?')) return;
+            try {
+              await api('/api/photos/' + id, null, { method: 'DELETE', token: S.account.token });
+              forgetPhotos([id]);
+              if (S.data.participants[p.id]) S.data.participants[p.id].photos = (S.data.participants[p.id].photos || []).filter(x => x !== id);
+              sync(); draw();
+            } catch (err) { toast(err.status ? err.message : 'You need to be online to remove photos', 'bad'); }
+          },
+        }, '×'))))
+        : h('p.small.muted', isMakers() ? 'Add progress or detail shots so judges can see the work up close.' : 'Add the character reference and build photos judges should compare against.'),
+      h('div.row', h('button.btn', { type: 'button', disabled: !online || ids.length >= 8, onclick: () => input.click() }, icon('photo'), ids.length ? 'Add more' : 'Add photos'),
+        status, online ? h('span.small.muted', `${ids.length} of 8`) : h('span.small.muted', 'Needs connection'), input));
+  };
+  draw();
+  return wrap;
+}
+
 // ============================================================ judge scoring
 function scoreId(pid, jid = S.account.user.id) { return pid + '__' + jid; }
 function scoreTotal(sc, crits = criteria()) {
@@ -1041,6 +1236,7 @@ function scoreForm(p, crits, locked, list) {
     h('div.row.between', h('div', h('span.kicker', p.division || WORDS().One), h('h2', { style: { margin: 0 } }, partLabel(p)),
       h('div.muted', partSub(p))),
     live?.submitted ? h('span.badge.submitted', 'Submitted') : live ? h('span.badge.draft', 'Draft — saved on device') : null),
+    photoStrip(p),
     p.judgeNotes ? h('div.banner.info', { style: { marginTop: '.75rem' } }, h('span.tag', isMakers() ? 'Maker notes' : 'Build notes'), h('span.grow', p.judgeNotes)) : null,
     sc?.deleted ? h('div.banner.warn', 'An admin cleared your earlier score for this contestant.') : null,
     crits.map(c => {
@@ -1181,6 +1377,7 @@ function reviewDetail(p) {
     h('div.panel',
       h('div.row.between', h('div', h('h2', { style: { margin: 0 } }, partLabel(p)), h('div.muted', partSub(p))),
         h('span.badge', { class: p.status }, (p.status || '').replace('_', ' '))),
+      photoStrip(p),
       h('div.table-wrap', { style: { marginTop: '1rem' } }, h('table',
         h('thead', h('tr', h('th', 'Judge'), crits.map(c => h('th.r', c.name.split(/[ /]/)[0])), h('th.r', 'Total'), h('th', 'Status'), h('th', ''))),
         h('tbody', rowsJ.map(j => {
@@ -1335,17 +1532,61 @@ function viewSetup() {
     h('div.panel.stack', h('h3', `Import ${W.many}`),
       h('p.small.muted', 'Paste rows from a spreadsheet or choose a CSV file. First row must be headers. Recognised columns: ' + (isMakers()
         ? 'number, entry title, maker, category, materials, judge notes, notes, contact, checked in.'
-        : 'number, name, character, series, division, judge notes, notes, contact, checked in.')),
+        : 'number, name, character, series, division, judge notes, notes, contact, music, lighting, intro, pronunciation, checked in.')),
       importBox(),
       h('div', h('button.btn.ghost.sm', { onclick: () => download(isMakers() ? 'makers-entries-template.csv' : 'contestant-template.csv', isMakers()
         ? 'number,entry title,maker,category,materials,judge notes,notes,contact\n1,Mjolnir replica,Sam Lee,Props,"EVA foam, resin, LEDs","Build log in binder",Fragile - table 4,sam@example.com\n'
-        : 'number,name,character,series,division,judge notes,notes,contact\n1,Jane Doe,Aloy,Horizon Zero Dawn,Novice,"EVA foam bow, 3D printed focus",Needs ramp,jane@example.com\n') }, 'Download CSV template'))));
+        : 'number,name,character,series,division,judge notes,notes,contact,music,lighting,intro,pronunciation\n1,Jane Doe,Aloy,Horizon Zero Dawn,Novice,"EVA foam bow, 3D printed focus",Needs ramp,jane@example.com,"Track 3, start 0:42",Warm amber,"From Boston, bringing the Nora huntress to life",JAYN doh\n') }, 'Download CSV template'))),
+
+    afterEventPanel(cid, online));
+}
+
+/** Clear personal data (admins, leads) and delete the contest (admins). */
+function afterEventPanel(cid, online) {
+  const st = settings();
+  const box = (label, on) => { const i = h('input', { type: 'checkbox', checked: on }); return { i, el: h('label.check', i, label) }; };
+  const o = { contact: box('Contact details', true), notes: box('Private staff notes', true), photos: box('Reference photos', false), comments: box('Judge comments', false) };
+  const ask = verb => prompt(`${verb}\n\nType the contest name to confirm:\n${st.name}`);
+  return h('div.panel.stack.danger-zone', h('div.row.between', h('h3', 'After the event'), online ? null : h('span.badge.draft', 'Needs connection')),
+    h('p.small.muted', 'Clear personal data once the contest is over. Names, scores and results are kept.'),
+    h('div.row', Object.values(o).map(x => x.el)),
+    h('div', h('button.btn.warn', {
+      disabled: !online,
+      onclick: async () => {
+        const picked = Object.entries(o).filter(([, x]) => x.i.checked).map(([k]) => k);
+        if (!picked.length) { toast('Tick at least one thing to clear', 'bad'); return; }
+        const t = ask(`This permanently clears ${picked.join(', ')} from every ${WORDS().one} in "${st.name}".`);
+        if (t === null) return;
+        try {
+          const r = await api(`/api/contests/${encodeURIComponent(cid)}/purge`, { confirm: t, contact: o.contact.i.checked, notes: o.notes.i.checked, photos: o.photos.i.checked, comments: o.comments.i.checked }, { token: S.account.token });
+          toast(`Cleared personal data (${r.changed} ${r.changed === 1 ? WORDS().one : WORDS().many} changed)`, 'ok'); sync();
+        } catch (e) { toast(e.status ? e.message : 'You need to be online', 'bad'); }
+      },
+    }, 'Clear personal data…')),
+    isAdmin() ? h('div.stack', h('h3', 'Delete contest'),
+      h('p.small.muted', `Deletes "${st.name}" and everything in it: ${WORDS().many}, scores, photos, audit log, and everyone's access to it. This can't be undone. To hide a contest but keep its data, use Archive on the Admin page instead.`),
+      h('div', h('button.btn.danger', {
+        disabled: !online,
+        onclick: async () => {
+          const t = ask(`Permanently delete "${st.name}" and all of its data?`);
+          if (t === null) return;
+          try {
+            await api(`/api/contests/${encodeURIComponent(cid)}/delete`, { confirm: t }, { token: S.account.token });
+            purgeContestLocal(cid);
+            toast(`Deleted ${st.name}`, 'ok');
+            await sync();
+            location.hash = '#/' + home(); render();
+          } catch (e) { toast(e.status ? e.message : 'You need to be online', 'bad'); }
+        },
+      }, 'Delete contest…'))) : null,
+    h('p.small.muted', 'The private GitHub repo keeps earlier versions of the data file in its history. The README explains how to remove them from there as well.'));
 }
 
 /** Who can see this contest, and as what. Admins manage everyone; leads manage judges, coordinators and viewers. */
 function accessPanel(cid, online) {
-  const ROLE_NOTE = { lead: 'runs this contest', coordinator: 'check-in & stage', judge: 'scores', viewer: 'read-only results' };
-  const grantable = isAdmin() ? ['judge', 'coordinator', 'lead', 'viewer'] : ['judge', 'coordinator', 'viewer'];
+  const ROLE_NOTE = { lead: 'runs this contest', coordinator: 'check-in & stage', judge: 'scores', viewer: 'read-only results', tech: 'sound & lighting cues', emcee: 'MC intros' };
+  const grantable = (isAdmin() ? ['judge', 'coordinator', 'lead', 'viewer', 'tech', 'emcee'] : ['judge', 'coordinator', 'viewer', 'tech', 'emcee'])
+    .filter(r => !(isMakers() && (r === 'tech' || r === 'emcee'))); // no stage in makers contests
   const everyone = Object.values(S.data.users).sort((a, b) => a.displayName.localeCompare(b.displayName));
   const members = everyone.filter(u => u.role !== 'admin' && (u.contests || {})[cid]);
   const admins = everyone.filter(u => u.role === 'admin' && u.active);
@@ -1522,7 +1763,7 @@ function accountsPanel(online) {
     password: h('input', { type: 'text', placeholder: 'Temporary password (8+, changed at first sign-in)', autocomplete: 'off', value: d.password || '', oninput: keep('password') }),
     kind: h('select', { onchange: keep('kind') }, h('option', { value: 'member', selected: d.kind !== 'admin' }, 'Member — access per contest'), h('option', { value: 'admin', selected: d.kind === 'admin' }, 'Admin — sees and manages everything')),
     cid: h('select', { onchange: keep('cid') }, h('option', { value: '' }, 'Add to contest… (optional)'), contests.filter(c => !c.archived).map(c => h('option', { value: c.id, selected: d.cid === c.id }, c.name))),
-    crole: h('select', { onchange: keep('crole') }, ['judge', 'coordinator', 'lead', 'viewer'].map(r => h('option', { value: r, selected: (d.crole || 'judge') === r }, 'as ' + r))),
+    crole: h('select', { onchange: keep('crole') }, ['judge', 'coordinator', 'lead', 'viewer', 'tech', 'emcee'].map(r => h('option', { value: r, selected: (d.crole || 'judge') === r }, 'as ' + r))),
   };
   return h('div.stack',
     h('div.table-wrap', h('table.edit-table',
@@ -1552,7 +1793,7 @@ function editAccess(u, contests, call) {
   const admin = h('input', { type: 'checkbox', checked: u.role === 'admin', disabled: u.id === S.account.user.id });
   const sel = {};
   const rows = contests.map(c => h('label.field', h('span', c.name + (c.archived ? ' (archived)' : '')),
-    sel[c.id] = h('select', h('option', { value: '' }, 'No access'), ['lead', 'coordinator', 'judge', 'viewer'].map(r => h('option', { value: r, selected: (u.contests || {})[c.id] === r }, r)))));
+    sel[c.id] = h('select', h('option', { value: '' }, 'No access'), ['lead', 'coordinator', 'judge', 'viewer', ...(c.type === 'makers' ? [] : ['tech', 'emcee'])].map(r => h('option', { value: r, selected: (u.contests || {})[c.id] === r }, r)))));
   const close = openModal(`Access · ${u.displayName}`, h('div.stack',
     h('label.check', admin, 'Admin — sees and manages every contest and all accounts'),
     h('p.small.muted', 'Per-contest roles (ignored while Admin is ticked):'),
@@ -1578,7 +1819,8 @@ function importBox() {
   const COMMON = { number: 'number', '#': 'number', 'entry #': 'number', 'contestant #': 'number', 'judge notes': 'judgeNotes', judgenotes: 'judgeNotes', 'build notes': 'judgeNotes', notes: 'notes', 'staff notes': 'notes', contact: 'contact', email: 'contact', phone: 'contact', 'checked in': 'checkedIn', checkedin: 'checkedIn', division: 'division', category: 'division' };
   const MAP = makers
     ? { ...COMMON, entry: 'title', 'entry title': 'title', title: 'title', piece: 'title', maker: 'name', name: 'name', 'maker name': 'name', materials: 'materials', 'materials & techniques': 'materials', techniques: 'materials' }
-    : { ...COMMON, entry: 'number', name: 'name', cosplayer: 'name', 'badge name': 'name', 'cosplay name': 'name', character: 'character', series: 'series', source: 'series', franchise: 'series' };
+    : { ...COMMON, entry: 'number', name: 'name', cosplayer: 'name', 'badge name': 'name', 'cosplay name': 'name', character: 'character', series: 'series', source: 'series', franchise: 'series',
+      music: 'music', 'music cue': 'music', sound: 'music', lighting: 'lighting', lights: 'lighting', intro: 'intro', 'emcee intro': 'intro', pronunciation: 'pronunciation', 'say it': 'pronunciation' };
   const parse = () => {
     const rows = parseCSV(ta.value.trim());
     if (rows.length < 2) return [];

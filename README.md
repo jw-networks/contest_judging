@@ -81,12 +81,33 @@ Everyone signs in with one account. An **admin** sees and manages every contest 
 | **Coordinator** | Check-in, adding walk-ins, stage control and the monitor |
 | **Judge** | Scores checked-in contestants. Sees only their own scores |
 | **Viewer** | Read-only: the contest's contestants and results. No private notes, judge comments or score breakdowns |
+| **Tech** | Cosplay only: a live tech-booth screen for whoever is on stage now and next, with music and lighting cues, the timer, and the running order |
+| **Emcee** | Cosplay only: a live MC screen for whoever is on stage now and next, with name pronunciation, intro text, and the running order |
 
 Admins create contests and accounts on the **Admin** page (the shield icon in the top bar, or in the account menu). In each contest's **Contest setup**, the **Who has access** list shows that contest's people. Add someone from the dropdown, or choose **New person…** to create an account on the spot. Removing someone's access takes effect at their next sync and clears that contest's data from their device. People who can open more than one contest get a **Contest** dropdown in the top bar to switch between them. Everyone else just sees their contest's name.
 
 All of this is enforced by the Worker. A device only ever receives the records its account may see.
 
 The **confidence monitor** needs no sign-in, so it can run on a screen facing the stage. It shows only the stage information for its contest.
+
+## Show details, photos and after the event
+
+- **Show details:** in a cosplay contestant's editor, coordinators fill in *music & sound cue*, *lighting notes*, *name pronunciation* and an *emcee intro*. These can also be CSV columns. The tech and emcee screens update on their own as the stage moves. Coordinators, leads and admins can open them from **Stage → Tech view / Emcee view**.
+- **Reference photos:** open an entry, then **Add photos**. A tablet can take them with its camera or pick them from the library. Photos are shrunk on the device before uploading, with up to 8 per entry. Judges see them on the score sheet and can tap one for full screen. Judges' devices keep copies, so photos still work offline at the table. Photos are stored in Cloudflare with the live data and are **not** copied to GitHub.
+- **After the event** (bottom of **Contest setup**):
+  - **Clear personal data** (admins and leads) removes contact details and private staff notes, and optionally reference photos and judge comments, from every entry. Names, scores and results are kept.
+  - **Delete contest** (admins only) removes the contest and everything in it: entries, scores, photos, its audit log, and everyone's roles in it.
+  - Both ask you to type the contest name to confirm.
+
+### Removing old data from GitHub history
+
+Spotlight overwrites `db.json` in the data repo, but **git keeps every earlier version**. Data you cleared or deleted therefore still exists in the repo's history. To remove it there too:
+
+1. In the app, use **Admin → GitHub data copy → Copy to GitHub now**, so the latest clean file is in the repo.
+2. Download that `db.json` from the data repo.
+3. Delete the data repo on GitHub (Settings → Danger zone), then create it again with the same name, private, with a README.
+4. Upload the clean `db.json` to it, or just click **Copy to GitHub now** again.
+5. If you recreated the repo, edit your fine-grained token so it includes the new repo, then **Admin → GitHub data copy** should show a fresh copy.
 
 ## Security summary
 

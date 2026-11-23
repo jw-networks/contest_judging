@@ -12,7 +12,9 @@
  */
 
 export const GLOBAL_ROLES = ['admin', 'member'];
-export const CONTEST_ROLES = ['lead', 'coordinator', 'judge', 'viewer'];
+export const CONTEST_ROLES = ['lead', 'coordinator', 'judge', 'viewer', 'tech', 'emcee'];
+const SHOW_FIELDS = ['music', 'lighting', 'intro', 'pronunciation']; // stage details for tech & emcee
+const MAX_PHOTOS = 8, MAX_PHOTO_BYTES = 1_200_000; // Cloudflare storage values max out at 2 MB
 export const CONTEST_TYPES = ['cosplay', 'makers'];
 export const COLLS = ['settings', 'contests', 'criteria', 'participants', 'scores', 'stage'];
 const STATUSES = ['registered', 'checked_in', 'on_stage', 'done', 'no_show'];
@@ -274,6 +276,10 @@ export class Contest {
       case 'participants':
         if (r === 'lead' || r === 'coordinator') return rec;
         if (r === 'viewer') return strip(rec, 'notes', 'contact');
+        if (r === 'tech' || r === 'emcee') {
+          if (rec.deleted) return { id: rec.id, rev: rec.rev, contestId: rec.contestId, hidden: true };
+          return strip(rec, 'notes', 'contact', 'judgeNotes', 'photos');
+        }
         if (r === 'judge') {
           const visible = !rec.deleted && rec.checkedIn && rec.status !== 'no_show';
           return visible ? strip(rec, 'notes', 'contact') : { id: rec.id, rev: rec.rev, contestId: rec.contestId, hidden: true };
@@ -317,8 +323,8 @@ export class Contest {
         break;
       case 'participants':
         if (has('contestId')) p.contestId = str(patch.contestId, 64);
-        for (const k of ['number', 'name', 'character', 'series', 'title', 'materials', 'division', 'judgeNotes', 'notes', 'contact']) {
-          if (has(k)) p[k] = str(patch[k], k.endsWith('otes') ? 2000 : 200);
+        for (const k of ['number', 'name', 'character', 'series', 'title', 'materials', 'division', 'judgeNotes', 'notes', 'contact', ...SHOW_FIELDS]) {
+          if (has(k)) p[k] = str(patch[k], k.endsWith('otes') || k === 'intro' ? 2000 : 300);
         }
         if (has('status') && STATUSES.includes(patch.status)) p.status = patch.status;
         if (has('checkedIn')) p.checkedIn = !!patch.checkedIn;
@@ -667,6 +673,105 @@ export class Contest {
       return json(200, { user: this.publicUser(u) });
     }
 
+    // ---- reference photos (stored in Cloudflare storage, never mirrored to GitHub)
+    if (url.pathname === '/api/photos' && req.method === 'POST') {
+      const actor = await this.requireUser(req);
+      const pid = url.searchParams.get('participant') || '';
+      const part = db.data.participants[pid];
+      if (!part || part.deleted) throw new HttpError(404, 'No such entry');
+      const r = this.roleIn(actor, part.contestId);
+      if (!['admin', 'lead', 'coordinator'].includes(r)) throw new HttpError(403, 'Only coordinators, leads and admins can add photos');
+      const type = (req.headers.get('Content-Type') || '').split(';')[0];
+      if (!['image/jpeg', 'image/png', 'image/webp'].includes(type)) throw new HttpError(415, 'Photos must be JPEG, PNG or WebP');
+      const buf = new Uint8Array(await req.arrayBuffer());
+      if (!buf.length) throw new HttpError(400, 'Empty photo');
+      if (buf.length > MAX_PHOTO_BYTES) throw new HttpError(413, 'Photo too large (max 1.2 MB after resizing)');
+      if ((part.photos || []).length >= MAX_PHOTOS) throw new HttpError(400, `At most ${MAX_PHOTOS} photos per entry`);
+      const id = newId();
+      // Raw bytes (no base64): cheap on CPU and well under the storage value limit.
+      await this.store.put({ ['photo:' + id]: { id, contestId: part.contestId, participantId: pid, type, data: buf, bytes: buf.length, createdAt: Date.now(), by: actor.id } });
+      Object.assign(part, { photos: [...(part.photos || []), id], rev: this.bump(), updatedAt: Date.now(), updatedBy: actor.id });
+      this.dirty.add('c:participants');
+      this.flags.stages.add(part.contestId);
+      return json(200, { id, photos: part.photos });
+    }
+    const pm = url.pathname.match(/^\/api\/photos\/([\w-]+)$/);
+    if (pm) {
+      const actor = await this.requireUser(req);
+      const rec = (await this.store.get(['photo:' + pm[1]])).get('photo:' + pm[1]);
+      if (!rec) throw new HttpError(404, 'No such photo');
+      const part = db.data.participants[rec.participantId];
+      if (req.method === 'GET') {
+        // Same visibility as the entry itself (judges: checked-in only; tech/emcee: no photos).
+        const view = part && this.project(actor, 'participants', part);
+        if (!view || view.hidden || !(view.photos || []).includes(rec.id)) throw new HttpError(404, 'No such photo');
+        return new Response(rec.data, { headers: { 'Content-Type': rec.type, 'Cache-Control': 'private, max-age=31536000, immutable' } });
+      }
+      if (req.method === 'DELETE') {
+        if (!['admin', 'lead', 'coordinator'].includes(this.roleIn(actor, rec.contestId))) throw new HttpError(403, 'Not permitted');
+        await this.store.delete(['photo:' + rec.id]);
+        if (part) {
+          Object.assign(part, { photos: (part.photos || []).filter(x => x !== rec.id), rev: this.bump(), updatedAt: Date.now(), updatedBy: actor.id });
+          this.dirty.add('c:participants');
+        }
+        return json(200, { ok: true });
+      }
+      throw new HttpError(405, 'Method not allowed');
+    }
+
+    // ---- clear personal data / delete a contest
+    const dm = url.pathname.match(/^\/api\/contests\/([\w-]+)\/(purge|delete)$/);
+    if (dm && req.method === 'POST') {
+      const actor = await this.requireUser(req);
+      const cid = dm[1];
+      const c = this.contest(cid);
+      if (!c) throw new HttpError(404, 'No such contest');
+      const body = await readBody(req);
+      if (String(body.confirm || '').trim() !== c.name.trim()) throw new HttpError(400, 'Type the contest name exactly to confirm');
+      const photoKeys = parts => parts.flatMap(p => (p.photos || []).map(id => 'photo:' + id));
+      const parts = Object.values(db.data.participants).filter(p => p.contestId === cid);
+
+      if (dm[2] === 'purge') {
+        if (!this.manages(actor, cid)) throw new HttpError(403, 'Only admins and this contest\'s leads can clear its personal data');
+        const what = { contact: body.contact !== false, notes: body.notes !== false, photos: !!body.photos, comments: !!body.comments };
+        let n = 0;
+        for (const p of parts) {
+          let changed = false;
+          if (what.contact && p.contact) { p.contact = ''; changed = true; }
+          if (what.notes && p.notes) { p.notes = ''; changed = true; }
+          if (what.photos && (p.photos || []).length) { await this.store.delete(photoKeys([p])); p.photos = []; changed = true; }
+          if (changed) { Object.assign(p, { rev: this.bump(), updatedAt: Date.now(), updatedBy: actor.id }); n++; }
+        }
+        if (what.comments) for (const sc of Object.values(db.data.scores)) {
+          if (sc.contestId === cid && sc.comment) { sc.comment = ''; sc.rev = this.bump(); }
+        }
+        this.dirty.add('c:participants'); this.dirty.add('c:scores');
+        Object.assign(c, { purgedAt: Date.now(), rev: this.bump() }); this.dirty.add('c:contests');
+        this.audit(actor, 'contest.purge', { contestId: cid, label: `${c.name}: cleared ${Object.entries(what).filter(([, v]) => v).map(([k]) => k).join(', ')} (${n} entries changed)` });
+        return json(200, { ok: true, changed: n });
+      }
+
+      // delete: admins only. Everything goes; a tombstone tells admin devices to drop it.
+      if (actor.role !== 'admin') throw new HttpError(403, 'Only admins can delete a contest');
+      await this.store.delete(photoKeys(parts));
+      for (const coll of ['criteria', 'participants', 'scores']) {
+        for (const [id, r] of Object.entries(db.data[coll])) if (r.contestId === cid) delete db.data[coll][id];
+        this.dirty.add('c:' + coll);
+      }
+      delete db.data.stage[cid]; this.dirty.add('c:stage');
+      db.data.contests[cid] = { id: cid, deleted: true, rev: this.bump(), updatedAt: Date.now(), updatedBy: actor.id };
+      this.dirty.add('c:contests');
+      for (const u of Object.values(db.users)) if ((u.contests || {})[cid]) { u.contests = { ...u.contests }; delete u.contests[cid]; u.rev = this.bump(); }
+      this.dirty.add('users');
+      const before = Math.ceil(db.audit.length / AUDIT_CHUNK);
+      db.audit = db.audit.filter(a => a.contestId !== cid);
+      const after = Math.ceil(db.audit.length / AUDIT_CHUNK);
+      for (let i = 0; i < Math.max(before, after); i++) this.dirty.add('audit:' + i);
+      if (after < before) await this.store.delete(Array.from({ length: before - after }, (_, i) => 'audit:' + (after + i)));
+      this.audit(actor, 'contest.delete', { label: `${c.name} (${c.type}, ${parts.length} entries)` });
+      return json(200, { ok: true });
+    }
+
     // ---- contest people: admins and that contest's leads
     const cm = url.pathname.match(/^\/api\/contests\/([\w-]+)\/(members|candidates|accounts)$/);
     if (cm) {
@@ -675,7 +780,7 @@ export class Contest {
       if (!this.contest(cid)) throw new HttpError(404, 'No such contest');
       if (!this.manages(actor, cid)) throw new HttpError(403, 'Only admins and this contest\'s leads can manage its people');
       const isAdminActor = actor.role === 'admin';
-      const grantable = isAdminActor ? CONTEST_ROLES : ['judge', 'coordinator', 'viewer'];
+      const grantable = isAdminActor ? CONTEST_ROLES : ['judge', 'coordinator', 'viewer', 'tech', 'emcee'];
       const cname = this.db.data.contests[cid].name;
 
       if (cm[2] === 'candidates' && req.method === 'GET') {
