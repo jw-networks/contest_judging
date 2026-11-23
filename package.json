@@ -1,0 +1,8 @@
+{
+  "name": "cosplay-contest-judge",
+  "version": "1.0.0",
+  "description": "Offline-first cosplay contest check-in, stage timer and judging app",
+  "private": true,
+  "scripts": { "start": "node server/server.js" },
+  "engines": { "node": ">=18" }
+}
