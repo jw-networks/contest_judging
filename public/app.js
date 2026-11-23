@@ -537,6 +537,7 @@ function render() {
     const typeTag = c => c.type === 'makers' ? ' (Makers)' : '';
     $('#cpick').replaceChildren(...openable.map(c => h('option', { value: c.id, selected: c.id === curId() }, c.name + typeTag(c))),
       ...(isAdmin() ? [h('option', { value: '__new__' }, '＋ New contest…')] : []));
+    fitSelect($('#cpick'));
   } else {
     $('#ev-name').textContent = curId() ? settings().name : (isAdmin() ? 'No contests yet' : APP_NAME);
     $('#brand-kicker').textContent = eventName() ? `${APP_NAME} · ${eventName()}` : APP_NAME;
@@ -571,6 +572,18 @@ function renderSync() {
   const labels = { online: n ? `Syncing ${n}` : 'Online', syncing: 'Connecting', offline: n ? `Offline · ${n} unsynced` : 'Offline', auth: 'Sign in to sync' };
   el.className = 'sync ' + S.net;
   el.replaceChildren(...[h('span.dot'), h('span.lbl', labels[S.net]), n ? h('span.count', String(n)) : null].filter(Boolean));
+}
+// A native dropdown is as wide as its longest option; size it to the chosen one so the chevron sits by the name.
+function fitSelect(sel) {
+  if (!sel) return;
+  const cs = getComputedStyle(sel);
+  const m = document.createElement('span');
+  // Copy each font property: Chrome reports an empty 'font' shorthand for this condensed variable font.
+  Object.assign(m.style, { position: 'absolute', visibility: 'hidden', whiteSpace: 'nowrap', fontFamily: cs.fontFamily, fontSize: cs.fontSize, fontWeight: cs.fontWeight, fontStretch: cs.fontStretch, fontVariationSettings: cs.fontVariationSettings, letterSpacing: cs.letterSpacing, textTransform: cs.textTransform });
+  m.textContent = sel.selectedOptions[0]?.textContent || '';
+  document.body.appendChild(m);
+  sel.style.width = Math.ceil(m.getBoundingClientRect().width) + 28 + 'px';
+  m.remove();
 }
 function viewNoContest() {
   return h('div.panel.accent', { style: { maxWidth: '560px', margin: '8vh auto' } },
