@@ -1,8 +1,11 @@
 {
-  "name": "cosplay-contest-judge",
-  "version": "1.0.0",
-  "description": "Offline-first cosplay contest check-in, stage timer and judging app",
+  "name": "contest-judging",
+  "version": "2.0.0",
+  "description": "Offline-first cosplay contest check-in, stage timer and judging app (GitHub Pages + Cloudflare Worker + private GitHub data repo)",
   "private": true,
-  "scripts": { "start": "node server/server.js" },
+  "type": "module",
+  "scripts": {
+    "dev": "node dev/server.mjs"
+  },
   "engines": { "node": ">=18" }
 }

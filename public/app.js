@@ -222,6 +222,7 @@ async function sync({ full = false } = {}) {
     saveAccount(S.account);
     S.lastSync = Date.now();
     setNet('online');
+    if (S.account.user.mustChangePassword) forcePasswordChange();
     persist();
     scheduleRender();
     if (prevRole !== res.user.role || (needFull && !full)) {
@@ -244,17 +245,36 @@ function setNet(n) {
   renderSync();
 }
 
-// Server-sent events: instant nudges when anything changes on the server.
-let es = null;
+// Live connection to the API (WebSocket): instant nudges when anything changes, and the stage timer.
+let ws = null, wsRetry = 1000, wsPing = null;
 function connectEvents() {
-  if (es) es.close();
-  try { es = new EventSource(serverBase() + '/api/events'); } catch { return; }
-  es.addEventListener('rev', e => { const { rev } = JSON.parse(e.data); if (S.account && rev !== S.rev) syncSoon(); });
-  es.addEventListener('stage', e => { monitorFeed(JSON.parse(e.data), 'server'); });
-  es.onopen = () => { if (S.account) syncSoon(); monitorConn(true); };
-  es.onerror = () => { monitorConn(false); if (S.account && S.net === 'online') setNet('offline'); };
+  const old = ws; ws = null;
+  try { old?.close(); } catch { /* ignore */ }
+  const base = serverBase() || location.origin;
+  let sock;
+  try { sock = new WebSocket(base.replace(/^http/, 'ws') + '/api/ws'); } catch { return; }
+  ws = sock;
+  sock.onopen = () => {
+    wsRetry = 1000; monitorConn(true);
+    if (S.account) syncSoon();
+    clearInterval(wsPing);
+    wsPing = setInterval(() => { if (sock.readyState === 1) sock.send('ping'); }, 30000);
+  };
+  sock.onmessage = e => {
+    if (e.data === 'pong') return;
+    let m; try { m = JSON.parse(e.data); } catch { return; }
+    if (m.type === 'rev') { if (S.account && m.rev !== S.rev) syncSoon(); }
+    else if (m.type === 'stage') monitorFeed(m, 'server');
+  };
+  sock.onclose = () => {
+    if (ws !== sock) return; // replaced on purpose
+    clearInterval(wsPing); monitorConn(false);
+    if (S.account && S.net === 'online') setNet('offline');
+    setTimeout(() => { if (ws === sock) connectEvents(); }, wsRetry);
+    wsRetry = Math.min(wsRetry * 2, 30000);
+  };
 }
-setInterval(() => { if (S.account && document.visibilityState === 'visible') sync(); }, 15000);
+setInterval(() => { if (S.account && document.visibilityState === 'visible') sync(); }, 20000);
 window.addEventListener('online', () => sync());
 window.addEventListener('offline', () => setNet('offline'));
 
@@ -421,15 +441,50 @@ function syncMenu() {
     h('button.btn.primary', { onclick: () => sync() }, 'Sync now'),
   ]);
 }
+let forcing = false;
+function forcePasswordChange() {
+  if (forcing || !S.account?.token) return;
+  forcing = true;
+  const cur = h('input', { type: 'password', placeholder: 'Current (temporary) password', autocomplete: 'current-password' });
+  const nw = h('input', { type: 'password', placeholder: 'New password (8+ characters)', autocomplete: 'new-password' });
+  const nw2 = h('input', { type: 'password', placeholder: 'New password again', autocomplete: 'new-password' });
+  const err = h('div.small', { style: { color: 'var(--bad)', minHeight: '1.2em' } });
+  const back = h('div.modal-back', h('div.modal', h('h2', 'Choose your own password'),
+    h('p.muted', 'You signed in with a temporary password. Please set a new one before continuing.'),
+    h('div.stack', cur, nw, nw2, err),
+    h('div.actions',
+      h('button.btn.ghost', { onclick: () => { back.remove(); forcing = false; logout(); } }, 'Sign out'),
+      h('button.btn.primary', {
+        onclick: async () => {
+          if (nw.value !== nw2.value) { err.textContent = 'The new passwords don\'t match'; return; }
+          try {
+            const r = await api('/api/password', { currentPassword: cur.value, newPassword: nw.value }, { token: S.account.token });
+            S.account.user = r.user;
+            if (hasSubtle) { S.account.salt = randHex(16); S.account.verifier = await pbkdf2(nw.value, S.account.salt); }
+            await saveAccount(S.account);
+            back.remove(); forcing = false; toast('Password updated', 'ok');
+          } catch (e) { err.textContent = e.status ? e.message : 'You need a connection to change your password'; }
+        },
+      }, 'Save password'))));
+  $('#modal-root').appendChild(back);
+  setTimeout(() => cur.focus(), 50);
+}
+
 function accountMenu() {
   const cur = h('input', { type: 'password', placeholder: 'Current password', autocomplete: 'current-password' });
-  const nw = h('input', { type: 'password', placeholder: 'New password (6+ characters)', autocomplete: 'new-password' });
+  const nw = h('input', { type: 'password', placeholder: 'New password (8+ characters)', autocomplete: 'new-password' });
   const close = openModal(S.account.user.displayName, h('div.stack',
     h('p.muted', `Signed in as ${S.account.username} · ${S.account.user.role}`),
     h('h3', 'Change password'), cur, nw,
     h('button.btn', {
       onclick: async () => {
-        try { await api('/api/password', { currentPassword: cur.value, newPassword: nw.value }, { token: S.account.token }); toast('Password changed. Sign in again on other devices.', 'ok'); close(); }
+        try {
+          const r = await api('/api/password', { currentPassword: cur.value, newPassword: nw.value }, { token: S.account.token });
+          S.account.user = r.user;
+          if (hasSubtle) { S.account.salt = randHex(16); S.account.verifier = await pbkdf2(nw.value, S.account.salt); }
+          await saveAccount(S.account);
+          toast('Password changed. Other devices will need to sign in again.', 'ok'); close();
+        }
         catch (e) { toast(e.status ? e.message : 'You need to be online to change your password', 'bad'); }
       },
     }, 'Change password')),
@@ -443,6 +498,8 @@ async function renderLogin(app) {
   const pw = h('input', { type: 'password', autocomplete: 'current-password', placeholder: 'Password' });
   const err = h('div.small', { style: { color: 'var(--bad)', minHeight: '1.2em' } });
   const btn = h('button.btn.primary.big', { type: 'submit', style: { width: '100%' } }, 'Sign in');
+  const unconfigured = !serverBase() && /github\.io$/.test(location.hostname);
+  if (unconfigured) setTimeout(() => { err.textContent = 'This app hasn\'t been connected to its server yet. An admin needs to set the API_URL variable in the GitHub repo (see README).'; }, 0);
   const serverInfo = h('div.small.muted', 'Server: ' + (serverBase() || location.origin) + ' · ',
     h('a', { href: '#', onclick: e => { e.preventDefault(); const v = prompt('Server address (leave blank for this site):', serverBase()); if (v !== null) { localStorage.setItem('cj-server', v.trim()); connectEvents(); render(); } } }, 'change'));
   const recent = Object.values(accounts);
@@ -999,6 +1056,7 @@ function describeAudit(a) {
     case 'user.create': return h('span', h('b', a.username), ` created user ${a.label}`);
     case 'user.update': return h('span', h('b', a.username), ` updated user ${a.label}`);
     case 'user.password': return h('span', h('b', a.username), ' changed their password');
+    case 'data.restore': return h('span', h('b', a.username), ' ', a.label);
     default: return h('span', h('b', a.username), ' ', a.action, ' ', a.label || '');
   }
 }
@@ -1064,7 +1122,9 @@ function viewSetup() {
       h('p.small.muted', 'Paste rows from a spreadsheet or choose a CSV file. First row must be headers. Recognised columns: number, name, character, series, division, judge notes, notes, contact, checked in.'),
       importBox()),
 
-    h('div.panel.stack', h('h2', 'Data'),
+    githubPanel(online),
+
+    h('div.panel.stack', h('h2', 'Downloads'),
       h('div.row',
         h('button.btn', { onclick: () => download('contestant-template.csv', 'number,name,character,series,division,judge notes,notes,contact\n1,Jane Doe,Aloy,Horizon Zero Dawn,Novice,"EVA foam bow, 3D printed focus",Needs ramp,jane@example.com\n') }, 'Download CSV template'),
         h('button.btn', {
@@ -1073,10 +1133,37 @@ function viewSetup() {
             try {
               const res = await fetch(serverBase() + '/api/backup', { headers: { Authorization: 'Bearer ' + S.account.token } });
               if (!res.ok) throw new Error();
-              download(`cosplay-backup-${new Date().toISOString().slice(0, 10)}.json`, await res.text(), 'application/json');
+              download(`contest-backup-${new Date().toISOString().slice(0, 10)}.json`, await res.text(), 'application/json');
             } catch { toast('Backup needs a connection to the server', 'bad'); }
           },
-        }, 'Download full backup'))));
+        }, 'Download backup (no passwords)'))));
+}
+
+function githubPanel(online) {
+  const body = h('div.stack', h('p.muted.small', online ? 'Checking…' : 'Connect to see the status of the GitHub copy.'));
+  const call = (method, payload) => api('/api/admin/github', payload, { method, token: S.account.token });
+  const draw = st => {
+    const pending = st.lastPushRev == null || st.lastPushRev !== st.rev;
+    body.replaceChildren(...[
+      h('p.small.muted', 'The live data is kept by the server and copied to the private GitHub repo ', h('b', `${st.repo}/${st.path}`), ` within about ${st.flushSeconds} seconds of any change.`),
+      !st.configured ? h('div.banner.bad', 'The server has no GitHub token or data repo configured, so nothing is being copied to GitHub.') : null,
+      h('div.tiles',
+        h('div.tile', h('div.v', { style: { fontSize: '1.1rem' } }, st.lastPushAt ? fmtTime(st.lastPushAt) : 'never'), h('div.l', 'Last copied to GitHub')),
+        h('div.tile', h('div.v', { style: { fontSize: '1.1rem', color: pending ? 'var(--warn)' : 'var(--ok)' } }, pending ? 'Changes waiting' : 'Up to date'), h('div.l', 'GitHub copy'))),
+      st.lastError && (!st.lastPushAt || st.lastErrorAt > st.lastPushAt) ? h('div.banner.bad', '⚠ Last attempt failed: ', st.lastError) : null,
+      h('div.row',
+        h('button.btn', { disabled: !st.configured, onclick: async () => { try { draw(await call('POST', { action: 'push' })); toast('Copied to GitHub', 'ok'); } catch (e) { toast(e.message, 'bad'); } } }, 'Copy to GitHub now'),
+        h('button.btn.danger', {
+          disabled: !st.configured,
+          onclick: async () => {
+            const t = prompt('This REPLACES all live data with the copy stored in GitHub (use it after editing the file by hand, or to roll back). Everyone stays signed in.\n\nType RESTORE to continue:');
+            if (t !== 'RESTORE') return;
+            try { draw(await call('POST', { action: 'restore', confirm: 'RESTORE' })); toast('Restored from GitHub', 'ok'); sync({ full: true }); } catch (e) { toast(e.message, 'bad'); }
+          },
+        }, 'Restore from GitHub…'))].filter(Boolean));
+  };
+  if (online) call('GET').then(draw).catch(e => body.replaceChildren(h('p.small', { style: { color: 'var(--bad)' } }, e.message)));
+  return h('div.panel.stack', h('h2', 'GitHub data copy'), body);
 }
 
 function usersTable(online) {
@@ -1084,7 +1171,7 @@ function usersTable(online) {
   const call = async (fn, okMsg) => {
     try { await fn(); toast(okMsg, 'ok'); sync(); } catch (e) { toast(e.status ? e.message : 'You need to be online to manage accounts', 'bad'); }
   };
-  const nu = { username: h('input', { type: 'text', placeholder: 'username', autocapitalize: 'none' }), displayName: h('input', { type: 'text', placeholder: 'Display name' }), password: h('input', { type: 'text', placeholder: 'Temporary password' }), role: h('select', ['judge', 'coordinator', 'admin'].map(r => h('option', { value: r }, r))) };
+  const nu = { username: h('input', { type: 'text', placeholder: 'username', autocapitalize: 'none' }), displayName: h('input', { type: 'text', placeholder: 'Display name' }), password: h('input', { type: 'text', placeholder: 'Temporary password (8+, changed at first sign-in)', autocomplete: 'off' }), role: h('select', ['judge', 'coordinator', 'admin'].map(r => h('option', { value: r }, r))) };
   return h('div.stack',
     h('div.table-wrap', h('table',
       h('thead', h('tr', h('th', 'Name'), h('th', 'Username'), h('th', 'Role'), h('th', 'Status'), h('th', ''))),
@@ -1094,7 +1181,7 @@ function usersTable(online) {
           ['judge', 'coordinator', 'admin'].map(r => h('option', { value: r, selected: u.role === r }, r)))),
         h('td', u.active ? 'active' : 'disabled'),
         h('td', h('div.row', { style: { gap: '.3rem' } },
-          h('button.btn.sm', { disabled: !online, onclick: () => { const pw = prompt(`New password for ${u.displayName} (6+ characters):`); if (pw) call(() => api('/api/users/' + u.id, { password: pw }, { method: 'PATCH', token: S.account.token }), 'Password reset'); } }, 'Reset password'),
+          h('button.btn.sm', { disabled: !online, onclick: () => { const pw = prompt(`Temporary password for ${u.displayName} (8+ characters). They'll be asked to change it when they sign in:`); if (pw) call(() => api('/api/users/' + u.id, { password: pw }, { method: 'PATCH', token: S.account.token }), 'Password reset'); } }, 'Reset password'),
           h('button.btn.sm.ghost', { disabled: !online || u.id === S.account.user.id, onclick: () => call(() => api('/api/users/' + u.id, { active: !u.active }, { method: 'PATCH', token: S.account.token }), u.active ? 'Account disabled' : 'Account enabled') }, u.active ? 'Disable' : 'Enable')))))))),
     h('div.form-grid', nu.displayName, nu.username, nu.password, nu.role),
     h('div', h('button.btn.primary', {

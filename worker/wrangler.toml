@@ -1,0 +1,27 @@
+name = "contest-judging-api"
+main = "src/index.js"
+compatibility_date = "2025-11-01"
+workers_dev = true
+
+[[durable_objects.bindings]]
+name = "CONTEST"
+class_name = "ContestDB"
+
+# Free plan requires SQLite-backed Durable Objects
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ContestDB"]
+
+[vars]
+# The GitHub Pages site allowed to call this API (comma-separate several)
+ALLOWED_ORIGINS = "https://jw-networks.github.io"
+# PRIVATE repo that holds the data file
+DATA_REPO = "jw-networks/contest_judging_data"
+DATA_BRANCH = "main"
+DATA_PATH = "db.json"
+# How often (at most) changes are pushed to GitHub
+FLUSH_SECONDS = "30"
+
+# Secrets (never put these in this file):
+#   DATA_REPO_TOKEN  fine-grained GitHub token, Contents: read & write on the data repo only
+#   ADMIN_PASSWORD   initial admin password (8+ chars), only used the very first time

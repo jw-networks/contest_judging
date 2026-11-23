@@ -1,0 +1,46 @@
+name: Deploy API (Cloudflare Worker)
+
+on:
+  push:
+    branches: [main]
+    paths: ['worker/**', '.github/workflows/worker.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: worker
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check required secrets
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+        run: |
+          missing=""
+          [ -z "$CF_TOKEN" ] && missing="$missing CLOUDFLARE_API_TOKEN"
+          [ -z "$CF_ACCOUNT" ] && missing="$missing CLOUDFLARE_ACCOUNT_ID"
+          [ -z "$DATA_REPO_TOKEN" ] && missing="$missing DATA_REPO_TOKEN"
+          [ -z "$ADMIN_PASSWORD" ] && missing="$missing ADMIN_PASSWORD"
+          if [ -n "$missing" ]; then echo "::error::Missing repository secrets:$missing (see README)"; exit 1; fi
+
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: worker
+          secrets: |
+            DATA_REPO_TOKEN
+            ADMIN_PASSWORD
+        env:
+          DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}

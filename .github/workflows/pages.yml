@@ -1,0 +1,43 @@
+name: Deploy app to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths: ['public/**', '.github/workflows/pages.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Point the app at the API
+        env:
+          API_URL: ${{ vars.API_URL }}
+        run: |
+          if [ -z "$API_URL" ]; then
+            echo "::warning::Repository variable API_URL is not set, so the app won't know where the server is."
+            exit 0
+          fi
+          case "$API_URL" in https://*) ;; *) echo "::error::API_URL must start with https://"; exit 1;; esac
+          node -e 'require("fs").writeFileSync("public/config.js", "window.APP_CONFIG = " + JSON.stringify({ serverUrl: process.env.API_URL.replace(/\/+$/, "") }) + ";\n")'
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+      - id: deployment
+        uses: actions/deploy-pages@v4

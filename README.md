@@ -1,22 +1,70 @@
 # Cosplay Contest Judge
 
-An offline-first scoring app for cosplay contests. It runs in any browser, installs on tablets as an app, and keeps working when the Wi-Fi drops. Every device saves its work locally and syncs with a central server whenever it can reach it.
+An offline-first scoring app for cosplay contests: check-in, a stage timer with a confidence monitor, judge scoring, results and audited score review. It runs in any browser, installs on tablets, and keeps working when the Wi-Fi drops.
 
-No dependencies. You need **Node.js 18 or newer** and nothing else.
+## How it fits together
 
-## Quick start
-
-```bash
-node server/server.js
+```
+ Tablets / laptops                 Cloudflare (free)                      GitHub
+┌──────────────────┐   https    ┌──────────────────────────┐  every ~30s  ┌──────────────────────────────┐
+│ App from GitHub  │──────────▶│  Worker = gatekeeper       │────────────▶│ PRIVATE repo                 │
+│ Pages            │◀──────────│  • checks logins & roles   │             │ contest_judging_data/db.json │
+│ (works offline,  │ live push  │  • holds the live data     │◀────────────│ (readable from anywhere,     │
+│  syncs later)    │            │  • holds the GitHub token  │  restore    │  full history in git)        │
+└──────────────────┘            └──────────────────────────┘             └──────────────────────────────┘
 ```
 
-On first run it creates `data/db.json` and prints a one-time **admin password**. Open `http://localhost:8080`, sign in as `admin`, and change that password (click your name, top right).
+- **This repo (public)** holds only code. GitHub Pages serves the app from `public/`.
+- **The data** lives in a separate **private** repo as one JSON file, `db.json`. You can open it, download it, or see its full history from anywhere you can sign in to GitHub.
+- **The Worker** sits in between. It checks every login and enforces the roles, and it is the only thing that holds the GitHub token. Tablets never see the token, so a judge can't touch other judges' scores or read data they shouldn't.
+- The Worker keeps the live copy and writes it to GitHub **within about 30 seconds** of any change. It batches the writes because GitHub limits API writes to 500 an hour.
+- If the Worker is ever redeployed from scratch, it **reloads everything from the GitHub file**. If GitHub can't be reached at that moment, it refuses to start rather than starting with an empty database.
 
-Then in **Setup**:
-1. Set the event name, the stage time per contestant and when the warning starts.
-2. Adjust the divisions and judging criteria. The defaults are Craftsmanship, Accuracy, Stage Presence and Overall Impact, each scored 0–10.
-3. Create accounts for your judges and coordinators.
-4. Import your contestant list (CSV or paste from a spreadsheet), or let coordinators add walk-ins at check-in.
+## One-time setup (about 20 minutes)
+
+### 1. Create the private data repo
+On GitHub, create **`jw-networks/contest_judging_data`**:
+- Visibility: **Private**
+- ✅ Tick **"Add a README file"**, so the `main` branch exists
+
+### 2. Create a GitHub token that can only touch that repo
+GitHub → your avatar → **Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token**
+- **Resource owner:** `jw-networks`. If it's an organization, an org owner may need to allow or approve fine-grained tokens.
+- **Expiration:** a date after your event
+- **Repository access:** *Only select repositories* → `contest_judging_data`
+- **Permissions → Repository permissions → Contents: Read and write.** Leave everything else at "No access". Metadata read-only is added automatically.
+
+Copy the token. You'll paste it in step 4.
+
+### 3. Create a free Cloudflare account
+1. Sign up at dash.cloudflare.com, then open **Workers & Pages** once so it creates your `*.workers.dev` subdomain.
+2. Copy your **Account ID**. It's shown on the Workers & Pages overview page.
+3. **My Profile → API Tokens → Create Token**, use the **"Edit Cloudflare Workers"** template, and copy the token.
+
+### 4. Add secrets to this repo
+`contest_judging` → **Settings → Secrets and variables → Actions → New repository secret**
+
+| Secret | Value |
+|---|---|
+| `CLOUDFLARE_API_TOKEN` | the token from step 3 |
+| `CLOUDFLARE_ACCOUNT_ID` | the account ID from step 3 |
+| `DATA_REPO_TOKEN` | the GitHub token from step 2 |
+| `ADMIN_PASSWORD` | the first admin password (8+ characters). It's only used the very first time, and you'll be made to change it at first sign-in |
+
+### 5. Deploy the Worker
+**Actions → "Deploy API (Cloudflare Worker)" → Run workflow.** When it finishes, the log shows the Worker's address, something like `https://contest-judging-api.<your-subdomain>.workers.dev`.
+
+### 6. Point the app at it and switch on Pages
+1. **Settings → Secrets and variables → Actions → Variables → New repository variable:** `API_URL` = the Worker address from step 5
+2. **Settings → Pages → Build and deployment → Source: GitHub Actions**
+3. **Actions → "Deploy app to GitHub Pages" → Run workflow**
+
+### 7. Sign in
+Open **https://jw-networks.github.io/contest_judging/** and sign in as `admin` with your `ADMIN_PASSWORD`. You'll be asked to choose a new password. Then go to **Setup** to set the event details and criteria, create accounts, and import contestants.
+
+On each tablet, open the same address and choose **Add to Home Screen / Install app**.
+
+After this, pushing changes to `public/` redeploys the app, and pushing changes to `worker/` redeploys the Worker, automatically.
 
 ## Who sees what
 
@@ -26,68 +74,67 @@ Then in **Setup**:
 | Stage control (running order, timer, next contestant) | ✓ | ✓ | |
 | Confidence monitor | ✓ | ✓ | |
 | Scoring (own sheets only, checked-in contestants only) | | | ✓ |
-| Results dashboard, lock scoring, CSV export, print | ✓ | | |
+| Results, lock scoring, CSV export, print | ✓ | | |
 | Score review and adjustment (reason required, audited) | ✓ | | |
-| Setup: event, criteria, accounts, import, backup | ✓ | | |
+| Setup: event, criteria, accounts, import, GitHub copy | ✓ | | |
 | Audit log | ✓ | | |
 
-These rules are enforced **on the server**, not just hidden in the UI. Judges never receive other judges' scores, the private staff notes, contact details, or contestants who haven't checked in. Coordinators never receive any scores.
+The Worker enforces all of this. Judges never receive other judges' scores, staff notes, contact details, or contestants who haven't checked in. Coordinators never receive any scores.
 
-The **confidence monitor** (`/#/monitor`) needs no sign-in, so you can put it on a screen facing the stage. It shows the contestant, a large countdown, and who's up next. It turns amber at the warning time and flashes red with an overtime count once time runs out. Double-click it, or use the hover button, to go full screen.
+The **confidence monitor** (`…/contest_judging/#/monitor`) needs no sign-in, so it can run on a screen facing the stage. It shows only the stage information: the contestant's number, name and character, the timer, and who's up next.
+
+## Security summary
+
+- **No data in the public repo.** Contest data is only in the private repo and in the Worker's storage.
+- **The GitHub token never leaves Cloudflare.** It is limited to the one data repo and to file contents only, so even if it leaked it couldn't touch your other repos or settings.
+- **Roles are enforced on the server** for every request, not just hidden in the app.
+- **Passwords** are salted and hashed (PBKDF2). Sessions use random tokens that are stored only as hashes and expire after 14 days. Disabling an account, changing its role or resetting its password signs that person out everywhere. New accounts and password resets force the person to choose their own password at first sign-in.
+- **Brute-force protection:** five wrong passwords lock that username and that address out for a minute, and the error message doesn't reveal whether a username exists.
+- **Only your Pages site can call the API.** Browsers on any other website are refused, and the app's own page restricts what scripts it can load (Content-Security-Policy).
+- **Audit trail.** Check-ins, score submissions and admin score edits (with reason, before and after) are logged in the app. On top of that, every saved version of `db.json` is kept in the data repo's git history.
+- **What's in `db.json`:** all contest data, accounts and password *hashes* (needed so a fresh deployment can restore logins), and the audit log. Sign-in sessions are never written to it. Keep the data repo private and limit who has access to it. The **Download backup** button in Setup leaves the password hashes out.
+
+## Using the GitHub copy
+
+- **Setup → GitHub data copy** shows when the data was last copied and whether changes are waiting. **Copy to GitHub now** forces an immediate copy, which is a good idea before announcing winners.
+- To **fix something by hand**, edit `db.json` in the data repo, then click **Restore from GitHub…** and type `RESTORE`. This replaces the live data with the file and keeps everyone signed in. Use the same button to roll back after checking out an older version of the file in GitHub.
 
 ## How offline works
 
-- Every action is saved on the device first (IndexedDB) and goes into an outbox. The sync dot in the top bar shows **Online**, **Offline · N unsynced**, or **Sign in to sync**.
-- When the server is reachable, the device sends its outbox and pulls anything newer. Devices are nudged instantly through a live event stream, and also check every 15 seconds.
-- A person who has signed in online once on a device can sign in there again with no connection.
-- **Conflicts:** each judge owns their own score sheets, so judges never collide with each other. If an admin adjusts a sheet while that judge is offline and the judge then edits it too, the admin's version wins and the judge sees a notice. Check-ins and stage changes simply take the most recent change.
-- Stage control and a monitor on the **same device** (for example a laptop with the monitor on an HDMI screen) keep working with no network at all. A monitor on a **different** device needs the server to receive updates. If the connection drops it keeps counting down from what it last received.
+- Every action is saved on the device first and goes into an outbox. The dot in the top bar shows **Online**, **Offline · N unsynced**, or **Sign in to sync**.
+- When the Worker is reachable, the device sends its outbox and pulls anything newer. A live connection nudges devices instantly, and they also check every 20 seconds.
+- Anyone who has signed in online once on a device can sign in on it again with no connection.
+- **Conflicts:** judges own their own sheets, so they never collide with each other. If an admin adjusts a sheet while that judge is offline, the admin's version wins and the judge sees a notice.
+- A monitor on the **same device** as stage control keeps working with no network. A monitor on a **different** device needs the connection to get updates, but it keeps counting down from what it last received.
 
-### HTTPS matters for tablets
+## Free-plan limits
 
-Browsers only allow offline app caching and installing to the home screen on **https://** (or `localhost`). Over plain `http://192.168.x.x`, the app still works and an open tab still survives Wi-Fi drops. But reloading the page while offline won't work, and neither will offline sign-in. So for real use, put the server behind HTTPS:
+For a contest with a few dozen contestants and a handful of judges, the Cloudflare and GitHub free tiers are comfortably enough. Two things to know:
+- Cloudflare's free plan gives each request very little processing time. Logins are tuned to fit. If you ever see "exceeded CPU" errors in the Worker logs, the $5/month Workers Paid plan removes that limit, with no code changes.
+- Login lockouts are kept in memory, so they reset if Cloudflare restarts the Worker.
 
-- **Easiest:** deploy to a host that gives you HTTPS automatically (Render, Railway, Fly.io, a VPS with Caddy). Start command: `node server/server.js`. Set `DATA_FILE` to a persistent disk.
-- **Venue laptop as the server:** run it locally and expose it with Cloudflare Tunnel or Tailscale Funnel to get an https URL. Or run Caddy with an internal certificate and trust it on the tablets.
+## Local testing
 
-Then on each tablet, open the URL and choose **Add to Home Screen / Install app**.
+```bash
+ADMIN_PASSWORD=changeme123 node dev/server.mjs     # Node 18+, no installs
+# open http://localhost:8787
+```
 
-## About GitHub
-
-GitHub is a good home for this **code**, but GitHub can't run the server or hold the database. You have two layouts:
-
-1. **One server does everything (recommended).** Clone the repo onto your host and run `node server/server.js`. It serves the app and the API from the same address.
-2. **App on GitHub Pages, server elsewhere.** Publish the `public/` folder with GitHub Pages. Set `serverUrl` in `public/config.js` to your server's https address, and start the server with `CORS_ORIGINS=https://yourname.github.io`.
-
-## Configuration (environment variables)
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `PORT` | `8080` | Port to listen on |
-| `HOST` | `0.0.0.0` | Interface to bind |
-| `DATA_FILE` | `data/db.json` | Where the database lives. A `.bak` copy is made on every start |
-| `ADMIN_PASSWORD` | random | Password for the first admin (first run only) |
-| `CORS_ORIGINS` | *(none)* | Comma-separated origins allowed to call the API when the app is hosted elsewhere |
+This runs the real Worker code, with a local folder (`dev/.data/`) standing in for Cloudflare storage and for the GitHub data repo. Use it to try changes before you push.
 
 ## Scoring math
 
-Each judge's total = Σ (criterion score × criterion weight). A contestant's result is the **average** of the submitted judge totals, so a missing judge doesn't sink anyone. Results are ranked within each division. Ties are flagged, not broken automatically. The "Judges" column shows anyone not yet scored by every judge in amber. **Lock scoring** freezes judge edits before you announce. Admins can still adjust sheets, and each adjustment is logged with a reason and its before and after values.
-
-## Backups
-
-- Admin → Setup → **Download full backup** (JSON of everything).
-- Results → **Export CSV** gives the rankings plus every raw score sheet.
-- The server keeps `db.json.bak` from its last start. Copy `data/db.json` somewhere safe after the event.
-
-`data/` is git-ignored. Don't commit the database: it contains password hashes.
+Each judge's total = Σ (criterion score × criterion weight). A contestant's result is the **average** of the submitted judge totals, ranked within each division. Ties are flagged, not broken automatically. **Lock scoring** freezes judge edits before you announce.
 
 ## Files
 
 ```
-server/server.js   API, auth, permissions, sync, live events, static hosting
-public/app.js      the whole client app (views, offline store, sync)
-public/sw.js       service worker (offline app shell)
-public/config.js   optional server address when hosted separately
+public/                 the app (deployed to GitHub Pages)
+worker/src/core.js      contest logic: accounts, roles, sync, audit
+worker/src/index.js     Cloudflare Worker + Durable Object, GitHub copy, live updates
+worker/wrangler.toml    Worker settings (allowed site, data repo name, copy interval)
+.github/workflows/      auto-deploy for Pages and the Worker
+dev/server.mjs          local test server
 ```
 
-When you change files in `public/`, bump `VERSION` in `public/sw.js` so installed tablets pick up the update.
+If you rename the data repo or use a custom domain for the app, update `DATA_REPO` or `ALLOWED_ORIGINS` in `worker/wrangler.toml`. When you change files in `public/`, bump `VERSION` in `public/sw.js` so installed tablets pick up the update.
