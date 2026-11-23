@@ -1335,54 +1335,54 @@ function viewSetup() {
 
 /** Who can see this contest, and as what. Admins edit; leads can see the list. */
 function accessPanel(cid, online) {
-  const people = Object.values(S.data.users).sort((a, b) => a.displayName.localeCompare(b.displayName));
-  const members = people.filter(u => (u.contests || {})[cid]);
-  const roleNote = { lead: 'runs this contest', coordinator: 'check-in & stage', judge: 'scores', viewer: 'read-only' };
+  const ROLE_NOTE = { lead: 'runs this contest', coordinator: 'check-in & stage', judge: 'scores', viewer: 'read-only results' };
+  const ROLES = ['judge', 'coordinator', 'lead', 'viewer'];
+  const everyone = Object.values(S.data.users).sort((a, b) => a.displayName.localeCompare(b.displayName));
+  const members = everyone.filter(u => u.role !== 'admin' && (u.contests || {})[cid]);
+  const admins = everyone.filter(u => u.role === 'admin' && u.active);
+  const roleBadge = r => h('span.badge.checked_in', r);
+  const adminLine = admins.length ? h('p.small.muted', `Admins always have full access: ${admins.map(u => u.displayName).join(', ')}.`) : null;
+
   if (!isAdmin()) {
     return h('div.panel.stack', h('h3', 'Who has access'),
-      h('p.small.muted', 'Ask an admin to add or remove people.'),
-      members.length ? h('div.list', members.map(u => h('div.item', { style: { cursor: 'default' } }, h('div.who', h('div.n', u.displayName), h('div.c', u.username)), h('span.badge.checked_in', u.contests[cid])))) : h('p.muted', 'Nobody yet.'));
+      members.length ? h('div.list', members.map(u => h('div.item', { style: { cursor: 'default' } },
+        h('div.who', h('div.n', u.displayName), h('div.c', ROLE_NOTE[u.contests[cid]] || '')), roleBadge(u.contests[cid]))))
+        : h('p.muted', 'Nobody has been added yet.'),
+      h('p.small.muted', 'Ask an admin to add or remove people.'));
   }
-  const setRole = async (u, r) => {
-    try { await api('/api/users/' + u.id, { contests: { [cid]: r || null } }, { method: 'PATCH', token: S.account.token }); toast(`${u.displayName}: ${r || 'no access'}`, 'ok'); sync(); }
-    catch (e) { toast(e.status ? e.message : 'You need to be online to change access', 'bad'); render(); }
-  };
-  return h('div.panel.stack', h('div.row.between', h('h3', 'Who has access'), online ? null : h('span.badge.draft', 'Needs connection')),
-    h('p.small.muted', 'Pick a role in this contest for each person. Lead runs the contest; coordinator does check-in and stage; judge scores; viewer sees results only. Admins always have full access. Create new accounts on the Admin page.'),
-    h('div.table-wrap', h('table.edit-table',
-      h('thead', h('tr', h('th', 'Person'), h('th', 'Role in this contest'))),
-      h('tbody', people.map(u => h('tr', { style: { opacity: u.active ? 1 : .5 } },
-        h('td', h('div', u.displayName), h('div.small.muted', u.username)),
-        h('td', u.role === 'admin' ? h('span.badge.checked_in', 'admin · all contests') : h('select', { disabled: !online, onchange: e => setRole(u, e.target.value) },
-          h('option', { value: '' }, 'No access'),
-          ['lead', 'coordinator', 'judge', 'viewer'].map(r => h('option', { value: r, selected: (u.contests || {})[cid] === r }, `${r} — ${roleNote[r]}`))))))))));
-}
 
-function githubPanel(online) {
-  const body = h('div.stack', h('p.muted.small', online ? 'Checking…' : 'Connect to see the status of the GitHub copy.'));
-  const call = (method, payload) => api('/api/admin/github', payload, { method, token: S.account.token });
-  const draw = st => {
-    const pending = st.lastPushRev == null || st.lastPushRev !== st.rev;
-    body.replaceChildren(...[
-      h('p.small.muted', 'The live data is kept by the server and copied to the private GitHub repo ', h('b', `${st.repo}/${st.path}`), ` within about ${st.flushSeconds} seconds of any change.`),
-      !st.configured ? h('div.banner.bad', 'The server has no GitHub token or data repo configured, so nothing is being copied to GitHub.') : null,
-      h('div.tiles',
-        h('div.tile', h('div.v', { style: { fontSize: '1.1rem' } }, st.lastPushAt ? fmtTime(st.lastPushAt) : 'never'), h('div.l', 'Last copied to GitHub')),
-        h('div.tile', h('div.v', { style: { fontSize: '1.1rem', color: pending ? 'var(--warn)' : 'var(--ok)' } }, pending ? 'Changes waiting' : 'Up to date'), h('div.l', 'GitHub copy'))),
-      st.lastError && (!st.lastPushAt || st.lastErrorAt > st.lastPushAt) ? h('div.banner.bad', h('span.tag', 'Failed'), h('span.grow', st.lastError)) : null,
-      h('div.row',
-        h('button.btn', { disabled: !st.configured, onclick: async () => { try { draw(await call('POST', { action: 'push' })); toast('Copied to GitHub', 'ok'); } catch (e) { toast(e.message, 'bad'); } } }, 'Copy to GitHub now'),
-        h('button.btn.danger', {
-          disabled: !st.configured,
-          onclick: async () => {
-            const t = prompt('This REPLACES all live data with the copy stored in GitHub (use it after editing the file by hand, or to roll back). Everyone stays signed in.\n\nType RESTORE to continue:');
-            if (t !== 'RESTORE') return;
-            try { draw(await call('POST', { action: 'restore', confirm: 'RESTORE' })); toast('Restored from GitHub', 'ok'); sync({ full: true }); } catch (e) { toast(e.message, 'bad'); }
-          },
-        }, 'Restore from GitHub…'))].filter(Boolean));
+  const setRole = async (u, r) => {
+    try {
+      await api('/api/users/' + u.id, { contests: { [cid]: r || null } }, { method: 'PATCH', token: S.account.token });
+      toast(r ? `${u.displayName} is now ${r === 'lead' ? 'a lead' : r === 'viewer' ? 'a viewer' : 'a ' + r}` : `${u.displayName} removed from ${settings().name}`, 'ok');
+      sync();
+    } catch (e) { toast(e.status ? e.message : 'You need to be online to change access', 'bad'); render(); }
   };
-  if (online) call('GET').then(draw).catch(e => body.replaceChildren(h('p.small', { style: { color: 'var(--bad)' } }, e.message)));
-  return h('div.panel.stack', h('h3', 'GitHub data copy'), body);
+  const roleSelect = (value, onchange) => h('select.role-select', { disabled: !online, onchange },
+    ROLES.map(r => h('option', { value: r, selected: value === r }, `${r[0].toUpperCase() + r.slice(1)} — ${ROLE_NOTE[r]}`)));
+
+  // Add someone: only accounts not already in this contest
+  const candidates = everyone.filter(u => u.role !== 'admin' && u.active && !(u.contests || {})[cid]);
+  const pick = h('select', { disabled: !online || !candidates.length },
+    h('option', { value: '' }, candidates.length ? 'Choose a person…' : 'Everyone is already in this contest'),
+    candidates.map(u => h('option', { value: u.id }, `${u.displayName} (${u.username})`)));
+  const pickRole = roleSelect('judge', null);
+  const addRow = h('div.access-add',
+    pick, pickRole,
+    h('button.btn.primary', {
+      disabled: !online || !candidates.length,
+      onclick: () => { const u = S.data.users[pick.value]; if (!u) { toast('Choose a person first', 'bad'); return; } setRole(u, pickRole.value); },
+    }, icon('plus'), 'Add'));
+
+  return h('div.panel.stack', h('div.row.between', h('h3', 'Who has access'), online ? null : h('span.badge.draft', 'Needs connection')),
+    addRow,
+    h('p.small.muted', 'Don\'t see someone? Create their account on the ', h('a', { href: '#/admin' }, 'Admin page'), ' first.'),
+    members.length ? h('div.list', members.map(u => h('div.item.access-row', { style: { cursor: 'default', opacity: u.active ? 1 : .5 } },
+      h('div.who', h('div.n', u.displayName, u.active ? null : h('span.badge.no_show', { style: { marginLeft: '6px' } }, 'disabled')), h('div.c', u.username)),
+      roleSelect(u.contests[cid], e => setRole(u, e.target.value)),
+      h('button.btn.sm.danger', { disabled: !online, onclick: () => { if (confirm(`Remove ${u.displayName} from ${settings().name}? Their scores are kept.`)) setRole(u, null); } }, 'Remove'))))
+      : h('p.muted', 'Nobody has been added to this contest yet.'),
+    adminLine);
 }
 
 // ============================================================ admin (account-wide)
