@@ -77,12 +77,12 @@ Everyone signs in with one account. An **admin** sees and manages every contest 
 
 | Role in a contest | Can do |
 |---|---|
-| **Lead** | Runs that contest: its settings, criteria, contestants, check-in, stage, results, lock scoring, score fixes, audit log |
+| **Lead** | Runs that contest: its settings, criteria, contestants, check-in, stage, results, lock scoring, score fixes, audit log. Adds and removes judges, coordinators and viewers, and can create accounts for them. Only admins add or change leads |
 | **Coordinator** | Check-in, adding walk-ins, stage control and the monitor |
 | **Judge** | Scores checked-in contestants. Sees only their own scores |
 | **Viewer** | Read-only: the contest's contestants and results. No private notes, judge comments or score breakdowns |
 
-Admins create contests and accounts on the **Admin** page. Each contest's **Contest setup** page has a "Who has access" list for choosing everyone's role in it. Removing someone's access takes effect at their next sync and clears that contest's data from their device. People in several contests switch between them from the contest name in the title bar.
+Admins create contests and accounts on the **Admin** page (the shield icon in the top bar, or in the account menu). In each contest's **Contest setup**, the **Who has access** list shows that contest's people. Add someone from the dropdown, or choose **New person…** to create an account on the spot. Removing someone's access takes effect at their next sync and clears that contest's data from their device. People who can open more than one contest get a **Contest** dropdown in the top bar to switch between them. Everyone else just sees their contest's name.
 
 All of this is enforced by the Worker. A device only ever receives the records its account may see.
 

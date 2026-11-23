@@ -488,13 +488,21 @@ function render() {
   if (!cur || (r.name !== 'none' && !routeAllowed(cur))) { location.hash = '#/' + home(); return; }
 
   let view = $('#view');
-  const shellKey = `${isAdmin()}|${role()}|${curId()}`;
+  // The contest picker only exists for people who can open two or more contests.
+  const openable = myContests().filter(c => !c.archived);
+  const switchable = openable.length > 1;
+  const shellKey = `${isAdmin()}|${role()}|${curId()}|${switchable}`;
   if (!view || app.dataset.shell !== shellKey) {
     app.dataset.shell = shellKey;
+    document.body.classList.toggle('multi-contest', switchable);
     app.replaceChildren(
       h('header.topbar',
-        h('button.brand#brand', { onclick: () => contestSheet(), title: 'Switch contest' }, h('img', { src: 'icons/icon.svg', alt: '' }),
-          h('div.grow', h('span.kicker#brand-kicker', APP_NAME), h('span#ev-name', settings().name)), h('span.switch-caret#caret')),
+        h('div.brand', h('img', { src: 'icons/icon.svg', alt: '' }),
+          h('div.grow.brand-text', h('span.kicker#brand-kicker', APP_NAME), h('span#ev-name', settings().name))),
+        switchable ? h('label.contest-pick', h('span.kicker', 'Contest'), h('select#cpick', {
+          title: 'Switch contest',
+          onchange: e => { const v = e.target.value; if (v === '__new__') { e.target.value = curId(); location.hash = '#/admin'; } else setContest(v); },
+        })) : null,
         h('nav.nav#nav'),
         h('div.topbar-right',
           h('button.sync#sync', { onclick: syncMenu, title: 'Sync status' }),
@@ -503,16 +511,27 @@ function render() {
       h('nav.tabbar#tabbar'));
     view = $('#view');
   }
-  $('#ev-name').textContent = curId() ? settings().name : (isAdmin() ? 'No contests yet' : APP_NAME);
-  $('#brand-kicker').textContent = eventName() ? `${APP_NAME} · ${eventName()}` : APP_NAME;
-  const switchable = isAdmin() || myContests().length > 1;
-  $('#caret').classList.toggle('hidden', !switchable);
-  $('#brand').disabled = !switchable;
+  if (switchable) {
+    // Contest name lives in the picker; the brand shows the event (or just the app name).
+    $('#brand-kicker').textContent = eventName() ? APP_NAME : '';
+    $('#brand-kicker').classList.toggle('hidden', !eventName());
+    $('#ev-name').textContent = eventName() || APP_NAME;
+    const typeTag = c => c.type === 'makers' ? ' (Makers)' : '';
+    $('#cpick').replaceChildren(...openable.map(c => h('option', { value: c.id, selected: c.id === curId() }, c.name + typeTag(c))),
+      ...(isAdmin() ? [h('option', { value: '__new__' }, '＋ New contest…')] : []));
+  } else {
+    $('#ev-name').textContent = curId() ? settings().name : (isAdmin() ? 'No contests yet' : APP_NAME);
+    $('#brand-kicker').textContent = eventName() ? `${APP_NAME} · ${eventName()}` : APP_NAME;
+    $('#brand-kicker').classList.remove('hidden');
+  }
   $('#who').textContent = S.account.user.displayName;
   const monitorLink = !!curId() && !isMakers() && !['judge', 'viewer'].includes(role());
   const monHref = '#/monitor/' + curId();
-  $('#nav').replaceChildren(...allowed.map(([k, v]) => h('a', { href: '#/' + k, class: k === r.name ? 'active' : '' }, v.title)),
-    ...(monitorLink ? [h('a', { href: monHref, target: '_blank', title: 'Open the confidence monitor in a new window' }, icon('monitor'), 'Monitor')] : []));
+  // Desktop nav: short names; Admin and Monitor as compact icons (with tooltips) so everything fits beside the picker.
+  const contestTabs = allowed.filter(([k]) => k !== 'admin');
+  $('#nav').replaceChildren(...contestTabs.map(([k, v]) => h('a', { href: '#/' + k, class: k === r.name ? 'active' : '', title: v.title }, v.short)),
+    ...(monitorLink ? [h('a.nav-icon', { href: monHref, target: '_blank', title: 'Open the confidence monitor in a new window', 'aria-label': 'Monitor' }, icon('monitor'))] : []),
+    ...(isAdmin() ? [h('a.nav-icon', { href: '#/admin', class: r.name === 'admin' ? 'active' : '', title: 'Admin: contests, accounts, GitHub copy', 'aria-label': 'Admin' }, icon('admin'))] : []));
   // Phones / portrait tablets: bottom tabs. One-screen roles (judges) get none.
   const entries = [...allowed.map(([k, v]) => ({ k, ...v })), ...(monitorLink ? [{ k: 'monitor/' + curId(), short: 'Monitor', title: 'Monitor', icon: 'monitor', ext: true }] : [])];
   const tabs = entries.length > TABS_MAX + 1 ? entries.slice(0, TABS_MAX) : entries;
@@ -534,18 +553,6 @@ function renderSync() {
   const labels = { online: n ? `Syncing ${n}` : 'Online', syncing: 'Connecting', offline: n ? `Offline · ${n} unsynced` : 'Offline', auth: 'Sign in to sync' };
   el.className = 'sync ' + S.net;
   el.replaceChildren(...[h('span.dot'), h('span.lbl', labels[S.net]), n ? h('span.count', String(n)) : null].filter(Boolean));
-}
-function contestSheet() {
-  const list = myContests();
-  if (!isAdmin() && list.length < 2) return;
-  const typeWord = c => c.type === 'makers' ? 'Makers' : 'Cosplay';
-  const close = openModal('Switch contest', h('div.stack',
-    h('div.sheet-list', list.length ? list.map(c => h('a', {
-      href: '#', class: c.id === curId() ? 'active' : '',
-      onclick: e => { e.preventDefault(); close(); if (c.archived) { toast('That contest is archived. Restore it on the Admin page to open it.', 'warn'); return; } setContest(c.id); },
-    }, icon(c.type === 'makers' ? 'setup' : 'stage'), h('span.grow', c.name, c.archived ? h('span.badge', { style: { marginLeft: '8px' } }, 'archived') : null),
-      h('span.badge', typeWord(c)), h('span.badge.checked_in', roleIn(c.id)))) : [h('p.muted', 'No contests yet.')]),
-    isAdmin() ? h('a.btn.ghost', { href: '#/admin', onclick: () => close() }, icon('plus'), 'New contest / manage') : null));
 }
 function viewNoContest() {
   return h('div.panel.accent', { style: { maxWidth: '560px', margin: '8vh auto' } },
@@ -618,7 +625,8 @@ function accountMenu() {
         catch (e) { toast(e.status ? e.message : 'You need to be online to change your password', 'bad'); }
       },
     }, 'Change password')),
-  [h('button.btn.danger', { onclick: () => { close(); logout(); } }, 'Sign out')]);
+  [isAdmin() ? h('a.btn.ghost', { href: '#/admin', onclick: () => close() }, icon('admin'), 'Admin page') : null,
+    h('button.btn.danger', { onclick: () => { close(); logout(); } }, 'Sign out')]);
 }
 
 // ============================================================ login view
@@ -1240,6 +1248,7 @@ function describeAudit(a) {
     case 'contests.update': return h('span', h('b', a.username), ' changed contest settings: ', kv2(a.after));
     case 'criteria.update': return h('span', h('b', a.username), ` changed criterion ${S.data.criteria[a.target]?.name || a.target}`);
     case 'user.create': return h('span', h('b', a.username), ` created account ${a.label}`);
+    case 'access.update': return h('span', h('b', a.username), ` changed access: ${a.label}`);
     case 'user.update': return h('span', h('b', a.username), ` updated account ${a.label}`);
     case 'user.password': return h('span', h('b', a.username), ' changed their password');
     case 'data.restore': return h('span', h('b', a.username), ' ', a.label);
@@ -1333,56 +1342,73 @@ function viewSetup() {
         : 'number,name,character,series,division,judge notes,notes,contact\n1,Jane Doe,Aloy,Horizon Zero Dawn,Novice,"EVA foam bow, 3D printed focus",Needs ramp,jane@example.com\n') }, 'Download CSV template'))));
 }
 
-/** Who can see this contest, and as what. Admins edit; leads can see the list. */
+/** Who can see this contest, and as what. Admins manage everyone; leads manage judges, coordinators and viewers. */
 function accessPanel(cid, online) {
   const ROLE_NOTE = { lead: 'runs this contest', coordinator: 'check-in & stage', judge: 'scores', viewer: 'read-only results' };
-  const ROLES = ['judge', 'coordinator', 'lead', 'viewer'];
+  const grantable = isAdmin() ? ['judge', 'coordinator', 'lead', 'viewer'] : ['judge', 'coordinator', 'viewer'];
   const everyone = Object.values(S.data.users).sort((a, b) => a.displayName.localeCompare(b.displayName));
   const members = everyone.filter(u => u.role !== 'admin' && (u.contests || {})[cid]);
   const admins = everyone.filter(u => u.role === 'admin' && u.active);
-  const roleBadge = r => h('span.badge.checked_in', r);
-  const adminLine = admins.length ? h('p.small.muted', `Admins always have full access: ${admins.map(u => u.displayName).join(', ')}.`) : null;
+  const cap = r => r[0].toUpperCase() + r.slice(1);
+  const roleSelect = (value, onchange, roles = grantable) => h('select.role-select', { disabled: !online, onchange },
+    roles.map(r => h('option', { value: r, selected: value === r }, `${cap(r)} — ${ROLE_NOTE[r]}`)));
+  const post = (path, body) => api(`/api/contests/${encodeURIComponent(cid)}/${path}`, body, { token: S.account.token });
+  const done = msg => { toast(msg, 'ok'); sync(); };
+  const fail = e => { toast(e.status ? e.message : 'You need to be online to change access', 'bad'); render(); };
+  const setRole = (u, r) => post('members', { userId: u.id, role: r || null })
+    .then(() => done(r ? `${u.displayName}: ${r}` : `${u.displayName} removed from ${settings().name}`), fail);
 
-  if (!isAdmin()) {
-    return h('div.panel.stack', h('h3', 'Who has access'),
-      members.length ? h('div.list', members.map(u => h('div.item', { style: { cursor: 'default' } },
-        h('div.who', h('div.n', u.displayName), h('div.c', ROLE_NOTE[u.contests[cid]] || '')), roleBadge(u.contests[cid]))))
-        : h('p.muted', 'Nobody has been added yet.'),
-      h('p.small.muted', 'Ask an admin to add or remove people.'));
-  }
-
-  const setRole = async (u, r) => {
-    try {
-      await api('/api/users/' + u.id, { contests: { [cid]: r || null } }, { method: 'PATCH', token: S.account.token });
-      toast(r ? `${u.displayName} is now ${r === 'lead' ? 'a lead' : r === 'viewer' ? 'a viewer' : 'a ' + r}` : `${u.displayName} removed from ${settings().name}`, 'ok');
-      sync();
-    } catch (e) { toast(e.status ? e.message : 'You need to be online to change access', 'bad'); render(); }
-  };
-  const roleSelect = (value, onchange) => h('select.role-select', { disabled: !online, onchange },
-    ROLES.map(r => h('option', { value: r, selected: value === r }, `${r[0].toUpperCase() + r.slice(1)} — ${ROLE_NOTE[r]}`)));
-
-  // Add someone: only accounts not already in this contest
-  const candidates = everyone.filter(u => u.role !== 'admin' && u.active && !(u.contests || {})[cid]);
-  const pick = h('select', { disabled: !online || !candidates.length },
-    h('option', { value: '' }, candidates.length ? 'Choose a person…' : 'Everyone is already in this contest'),
-    candidates.map(u => h('option', { value: u.id }, `${u.displayName} (${u.username})`)));
+  // ---- add row: existing account, or a brand-new one
+  const NEW = '__new__';
+  const pick = h('select', { disabled: !online }, h('option', { value: '' }, online ? 'Loading people…' : 'Connect to add people'));
   const pickRole = roleSelect('judge', null);
-  const addRow = h('div.access-add',
-    pick, pickRole,
-    h('button.btn.primary', {
-      disabled: !online || !candidates.length,
-      onclick: () => { const u = S.data.users[pick.value]; if (!u) { toast('Choose a person first', 'bad'); return; } setRole(u, pickRole.value); },
-    }, icon('plus'), 'Add'));
+  const nf = {
+    displayName: h('input', { type: 'text', placeholder: 'Display name' }),
+    username: h('input', { type: 'text', placeholder: 'username', autocapitalize: 'none', autocomplete: 'off' }),
+    password: h('input', { type: 'text', placeholder: 'Temporary password (8+)', autocomplete: 'off' }),
+  };
+  const newForm = h('div.form-grid.hidden', nf.displayName, nf.username, nf.password);
+  pick.addEventListener('change', () => newForm.classList.toggle('hidden', pick.value !== NEW));
+  if (online) post('candidates').then(r => {
+    pick.replaceChildren(
+      h('option', { value: '' }, r.candidates.length ? 'Choose a person…' : 'No one else yet — create a new person'),
+      ...r.candidates.map(u => h('option', { value: u.id }, `${u.displayName} (${u.username})`)),
+      h('option', { value: NEW }, '＋ New person…'));
+  }).catch(() => { pick.replaceChildren(h('option', { value: '' }, 'Couldn\'t load people')); });
+  const addBtn = h('button.btn.primary', {
+    disabled: !online,
+    onclick: async () => {
+      if (pick.value === NEW) {
+        try {
+          await post('accounts', { displayName: nf.displayName.value.trim(), username: nf.username.value.trim(), password: nf.password.value, role: pickRole.value });
+          done(`Created ${nf.displayName.value.trim() || nf.username.value.trim()} as ${pickRole.value}. Give them the username and temporary password; they'll choose their own at first sign-in.`);
+        } catch (e) { toast(e.status ? e.message : 'You need to be online to add people', 'bad'); }
+        return;
+      }
+      if (!pick.value) { toast('Choose a person first', 'bad'); return; }
+      const label = pick.selectedOptions[0].textContent.replace(/ \(.*\)$/, '');
+      post('members', { userId: pick.value, role: pickRole.value }).then(() => done(`${label} added as ${pickRole.value}`), fail);
+    },
+  }, icon('plus'), 'Add');
+
+  const rows = members.map(u => {
+    const r = u.contests[cid];
+    const locked = !isAdmin() && r === 'lead'; // leads can't change or remove leads (including themselves)
+    return h('div.item.access-row', { style: { cursor: 'default', opacity: u.active ? 1 : .5 } },
+      h('div.who', h('div.n', u.displayName, u.id === S.account.user.id ? h('span.badge', { style: { marginLeft: '6px' } }, 'you') : null,
+        u.active ? null : h('span.badge.no_show', { style: { marginLeft: '6px' } }, 'disabled')), h('div.c', u.username)),
+      locked ? h('span.badge.checked_in', 'Lead — runs this contest') : roleSelect(r, e => setRole(u, e.target.value)),
+      locked ? null : h('button.btn.sm.danger', { disabled: !online, onclick: () => { if (confirm(`Remove ${u.displayName} from ${settings().name}? Their scores are kept.`)) setRole(u, null); } }, 'Remove'));
+  });
 
   return h('div.panel.stack', h('div.row.between', h('h3', 'Who has access'), online ? null : h('span.badge.draft', 'Needs connection')),
-    addRow,
-    h('p.small.muted', 'Don\'t see someone? Create their account on the ', h('a', { href: '#/admin' }, 'Admin page'), ' first.'),
-    members.length ? h('div.list', members.map(u => h('div.item.access-row', { style: { cursor: 'default', opacity: u.active ? 1 : .5 } },
-      h('div.who', h('div.n', u.displayName, u.active ? null : h('span.badge.no_show', { style: { marginLeft: '6px' } }, 'disabled')), h('div.c', u.username)),
-      roleSelect(u.contests[cid], e => setRole(u, e.target.value)),
-      h('button.btn.sm.danger', { disabled: !online, onclick: () => { if (confirm(`Remove ${u.displayName} from ${settings().name}? Their scores are kept.`)) setRole(u, null); } }, 'Remove'))))
-      : h('p.muted', 'Nobody has been added to this contest yet.'),
-    adminLine);
+    h('div.access-add', pick, pickRole, addBtn),
+    newForm,
+    h('p.small.muted', isAdmin()
+      ? 'Pick an existing account or "New person…". Use the Admin page to give someone roles in several contests at once.'
+      : 'Add judges, coordinators and viewers to this contest, or create a new person. Only admins can add or change leads.'),
+    rows.length ? h('div.list', rows) : h('p.muted', 'Nobody has been added to this contest yet.'),
+    admins.length ? h('p.small.muted', `Admins always have full access: ${admins.map(u => u.displayName).join(', ')}.`) : null);
 }
 
 function githubPanel(online) {

@@ -667,6 +667,59 @@ export class Contest {
       return json(200, { user: this.publicUser(u) });
     }
 
+    // ---- contest people: admins and that contest's leads
+    const cm = url.pathname.match(/^\/api\/contests\/([\w-]+)\/(members|candidates|accounts)$/);
+    if (cm) {
+      const actor = await this.requireUser(req);
+      const cid = cm[1];
+      if (!this.contest(cid)) throw new HttpError(404, 'No such contest');
+      if (!this.manages(actor, cid)) throw new HttpError(403, 'Only admins and this contest\'s leads can manage its people');
+      const isAdminActor = actor.role === 'admin';
+      const grantable = isAdminActor ? CONTEST_ROLES : ['judge', 'coordinator', 'viewer'];
+      const cname = this.db.data.contests[cid].name;
+
+      if (cm[2] === 'candidates' && req.method === 'GET') {
+        const list = Object.values(db.users).filter(u => u.active && u.role !== 'admin' && !(u.contests || {})[cid])
+          .map(u => ({ id: u.id, displayName: u.displayName, username: u.username }))
+          .sort((a, b) => a.displayName.localeCompare(b.displayName));
+        return json(200, { candidates: list });
+      }
+
+      if (cm[2] === 'members' && req.method === 'POST') {
+        const { userId, role } = await readBody(req);
+        const u = db.users[userId];
+        if (!u) throw new HttpError(404, 'No such account');
+        if (u.role === 'admin') throw new HttpError(400, 'Admins already have full access to every contest');
+        const current = (u.contests || {})[cid] || null;
+        const next = role || null;
+        if (next && !grantable.includes(next)) throw new HttpError(403, isAdminActor ? 'Invalid role' : 'Only admins can make someone a lead');
+        if (!isAdminActor && current === 'lead') throw new HttpError(403, 'Only admins can change or remove a lead');
+        if (next && !u.active) throw new HttpError(400, 'That account is disabled');
+        u.contests = { ...(u.contests || {}) };
+        if (next) u.contests[cid] = next; else delete u.contests[cid];
+        u.rev = this.bump();
+        this.dirty.add('users');
+        this.audit(actor, 'access.update', { contestId: cid, target: u.id, label: `${u.displayName} → ${next || 'removed'} in ${cname}` });
+        return json(200, { user: this.publicUser(u, isAdminActor ? undefined : [cid]) });
+      }
+
+      if (cm[2] === 'accounts' && req.method === 'POST') {
+        const { username, displayName, password, role } = await readBody(req);
+        const uname = String(username || '').trim();
+        if (!/^[a-zA-Z0-9._-]{2,40}$/.test(uname)) throw new HttpError(400, 'Username: 2–40 letters, numbers, . _ -');
+        if (Object.values(db.users).some(x => x.username.toLowerCase() === uname.toLowerCase())) throw new HttpError(400, 'That username is taken');
+        if (String(password || '').length < 8) throw new HttpError(400, 'Temporary password must be at least 8 characters');
+        const r = role || 'judge';
+        if (!grantable.includes(r)) throw new HttpError(403, isAdminActor ? 'Invalid role' : 'Only admins can make someone a lead');
+        const id = newId();
+        db.users[id] = { id, username: uname, displayName: str(displayName || uname, 80), role: 'member', contests: { [cid]: r }, ...(await hashPassword(password)), active: true, mustChangePassword: true, createdAt: Date.now(), rev: this.bump() };
+        this.dirty.add('users');
+        this.audit(actor, 'user.create', { contestId: cid, target: id, label: `${uname} as ${r} in ${cname}` });
+        return json(200, { user: this.publicUser(db.users[id], isAdminActor ? undefined : [cid]) });
+      }
+      throw new HttpError(405, 'Method not allowed');
+    }
+
     if (route === 'GET /api/backup') {
       await this.requireUser(req, 'admin');
       const snap = this.snapshot();
