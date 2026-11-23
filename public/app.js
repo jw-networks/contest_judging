@@ -1385,6 +1385,33 @@ function accessPanel(cid, online) {
     adminLine);
 }
 
+function githubPanel(online) {
+  const body = h('div.stack', h('p.muted.small', online ? 'Checking…' : 'Connect to see the status of the GitHub copy.'));
+  const call = (method, payload) => api('/api/admin/github', payload, { method, token: S.account.token });
+  const draw = st => {
+    const pending = st.lastPushRev == null || st.lastPushRev !== st.rev;
+    body.replaceChildren(...[
+      h('p.small.muted', 'The live data is kept by the server and copied to the private GitHub repo ', h('b', `${st.repo}/${st.path}`), ` within about ${st.flushSeconds} seconds of any change.`),
+      !st.configured ? h('div.banner.bad', 'The server has no GitHub token or data repo configured, so nothing is being copied to GitHub.') : null,
+      h('div.tiles',
+        h('div.tile', h('div.v', { style: { fontSize: '1.1rem' } }, st.lastPushAt ? fmtTime(st.lastPushAt) : 'never'), h('div.l', 'Last copied to GitHub')),
+        h('div.tile', h('div.v', { style: { fontSize: '1.1rem', color: pending ? 'var(--warn)' : 'var(--ok)' } }, pending ? 'Changes waiting' : 'Up to date'), h('div.l', 'GitHub copy'))),
+      st.lastError && (!st.lastPushAt || st.lastErrorAt > st.lastPushAt) ? h('div.banner.bad', h('span.tag', 'Failed'), h('span.grow', st.lastError)) : null,
+      h('div.row',
+        h('button.btn', { disabled: !st.configured, onclick: async () => { try { draw(await call('POST', { action: 'push' })); toast('Copied to GitHub', 'ok'); } catch (e) { toast(e.message, 'bad'); } } }, 'Copy to GitHub now'),
+        h('button.btn.danger', {
+          disabled: !st.configured,
+          onclick: async () => {
+            const t = prompt('This REPLACES all live data with the copy stored in GitHub (use it after editing the file by hand, or to roll back). Everyone stays signed in.\n\nType RESTORE to continue:');
+            if (t !== 'RESTORE') return;
+            try { draw(await call('POST', { action: 'restore', confirm: 'RESTORE' })); toast('Restored from GitHub', 'ok'); sync({ full: true }); } catch (e) { toast(e.message, 'bad'); }
+          },
+        }, 'Restore from GitHub…'))].filter(Boolean));
+  };
+  if (online) call('GET').then(draw).catch(e => body.replaceChildren(h('p.small', { style: { color: 'var(--bad)' } }, e.message)));
+  return h('div.panel.stack', h('h3', 'GitHub data copy'), body);
+}
+
 // ============================================================ admin (account-wide)
 function viewAdmin() {
   const online = S.net === 'online';
