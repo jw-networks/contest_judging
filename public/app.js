@@ -265,7 +265,7 @@ function setNet(n) {
   const wasOnline = S.net === 'online';
   S.net = n;
   renderSync();
-  if (wasOnline !== (n === 'online') && route().name === 'setup') scheduleRender(); // enable/disable online-only buttons
+  if (wasOnline !== (n === 'online') && ['setup', 'judge'].includes(route().name)) scheduleRender(); // online-only buttons, offline banner
 }
 
 // Live connection to the API (WebSocket): instant nudges when anything changes, and the stage timer.
@@ -878,33 +878,53 @@ function viewJudge() {
   const sel = S.data.participants[ui.judgeSel];
   const locked = !!st.scoresLocked;
 
+  const offline = S.net === 'offline' || S.net === 'auth';
   return h('div',
     locked ? h('div.banner.bad', h('span.tag', 'Locked'), 'Scoring is locked by the admin. Your scores are read-only.') : null,
-    onStage && onStage.id !== ui.judgeSel ? h('div.banner.stage', h('span.tag', 'On stage'), h('div.grow', h('b', partLabel(onStage)), onStage.character ? ` — ${onStage.character}` : ''),
-      h('button.btn.primary', { onclick: () => { ui.judgeSel = onStage.id; render(); } }, 'Score now')) : null,
+    offline ? h('div.banner.warn', h('span.tag', 'Offline'), h('span.grow', S.net === 'auth'
+      ? 'Sign in again to send your scores. They are saved on this tablet.'
+      : 'Follow the stage and use Next. Your scores are saved on this tablet and send automatically when you reconnect.')) : null,
+    !offline && onStage && onStage.id !== ui.judgeSel ? h('div.banner.stage', h('span.tag', 'On stage'), h('div.grow', h('b', partLabel(onStage)), onStage.character ? ` — ${onStage.character}` : ''),
+      h('button.btn.primary', { onclick: () => goJudge(onStage.id) }, 'Score now')) : null,
     h('div.grid.cols-2',
       h('div.panel', h('div.row.between', h('h3', 'Contestants'), h('span.muted.small', `${scored}/${list.length} submitted`)),
         h('div.list', list.length ? list.map(p => {
           const sc = S.data.scores[scoreId(p.id)];
           const live = sc && !sc.deleted;
-          return h('div.item', { class: p.id === ui.judgeSel ? 'sel' : '', onclick: () => { ui.judgeSel = p.id; render(); window.scrollTo({ top: 0, behavior: 'smooth' }); } },
+          return h('div.item', { class: p.id === ui.judgeSel ? 'sel' : '', onclick: () => goJudge(p.id) },
             h('div.num', p.number || '–'),
             h('div.who', h('div.n', p.name), h('div.c', [p.character, p.division].filter(Boolean).join(' · '))),
-            p.id === stg.participantId ? h('span.badge.on_stage', 'on stage') : null,
+            p.id === stg.participantId ? h('span.badge.on_stage', offline ? 'last on stage' : 'on stage') : null,
             live && sc.submitted ? h('span.badge.submitted', 'Done ' + fmt1(scoreTotal(sc, crits).total)) : live && scoreTotal(sc, crits).filled ? h('span.badge.draft', 'draft') : null);
         }) : h('p.muted', 'Contestants appear here once they are checked in.'))),
-      sel ? scoreForm(sel, crits, locked) : h('div.panel.muted', 'Pick a contestant to score.')));
+      sel ? scoreForm(sel, crits, locked, list) : h('div.panel.muted', 'Pick a contestant to score.')));
 }
 
-function scoreForm(p, crits, locked) {
+// Move the judge to another contestant and bring the score sheet into view (it sits below the list on phones).
+function goJudge(id) {
+  ui.judgeSel = id;
+  render();
+  requestAnimationFrame(() => $('#scoreform')?.scrollIntoView({ block: 'start', behavior: 'smooth' }));
+}
+
+function scoreForm(p, crits, locked, list) {
   const id = scoreId(p.id);
+  const idx = list.findIndex(x => x.id === p.id);
+  const prev = idx > 0 ? list[idx - 1] : null;
+  const next = idx >= 0 && idx < list.length - 1 ? list[idx + 1] : null;
+  const isDone = x => { const s2 = S.data.scores[scoreId(x.id)]; return !!(s2 && s2.submitted && !s2.deleted); };
+  const nextUnscored = [...list.slice(idx + 1), ...list.slice(0, Math.max(0, idx))].find(x => !isDone(x)) || null;
   const sc = S.data.scores[id];
   const live = sc && !sc.deleted ? sc : null;
   const { total, complete } = scoreTotal(live, crits);
   const set = patch => mutate('scores', id, { ...patch, ...(sc?.deleted ? { deleted: false } : {}) });
   const comment = h('textarea', { rows: 3, placeholder: 'Private notes / feedback (optional)', disabled: locked, oninput: debounce(e => set({ comment: e.target.value }), 400) }, live?.comment || '');
 
-  return h('div.panel',
+  return h('div.panel#scoreform',
+    h('div.judge-nav',
+      h('button.btn.sm.ghost', { disabled: !prev, onclick: () => goJudge(prev.id) }, '← Prev'),
+      h('span.pos', idx >= 0 ? `${idx + 1} of ${list.length}` : ''),
+      h('button.btn.sm.ghost', { disabled: !next, onclick: () => goJudge(next.id) }, 'Next →')),
     h('div.row.between', h('div', h('span.kicker', p.division || 'Contestant'), h('h2', { style: { margin: 0 } }, partLabel(p)),
       h('div.muted', [p.character, p.series].filter(Boolean).join(' — '))),
     live?.submitted ? h('span.badge.submitted', 'Submitted') : live ? h('span.badge.draft', 'Draft — saved on device') : null),
@@ -922,17 +942,18 @@ function scoreForm(p, crits, locked) {
     h('div', { style: { marginTop: '1rem' } }, comment),
     h('div.total-bar',
       h('div', h('div.small.muted', 'Total'), h('div.t', fmt1(total), h('span.muted', { style: { fontSize: '1rem' } }, ` / ${maxTotal(crits)}`))),
-      locked ? null : live?.submitted
-        ? h('div.small.muted', { style: { textAlign: 'right' } }, 'Submitted. You can still change scores', h('br'), 'until the admin locks scoring.')
+      locked ? (next ? h('button.btn.big', { onclick: () => goJudge(next.id) }, 'Next →') : null) : live?.submitted
+        ? h('div.row', { style: { justifyContent: 'flex-end' } },
+          h('div.small.muted', { style: { textAlign: 'right' } }, 'Submitted. You can still change', h('br'), 'scores until scoring is locked.'),
+          next ? h('button.btn.big', { onclick: () => goJudge((nextUnscored || next).id) }, 'Next →') : null)
         : h('button.btn.ok.big', {
           onclick: () => {
             if (!complete && !confirm('Some criteria have no score. Submit anyway? Blank criteria count as 0.')) return;
             set({ submitted: true });
-            toast(`Score submitted for ${partLabel(p)}`, 'ok');
-            const next = runOrder().find(x => x.id !== p.id && x.status !== 'no_show' && !S.data.scores[scoreId(x.id)]?.submitted);
-            if (next) ui.judgeSel = next.id;
+            if (nextUnscored) { toast(`Submitted ${partLabel(p)}. Next up: ${partLabel(nextUnscored)}`, 'ok'); goJudge(nextUnscored.id); }
+            else toast(`Submitted ${partLabel(p)}. You've scored everyone in your list.`, 'ok');
           },
-        }, 'Submit score')));
+        }, nextUnscored ? 'Submit & next' : 'Submit score')));
 }
 
 // ============================================================ results (admin)

@@ -162,7 +162,7 @@ main { padding: 18px; max-width: 1400px; margin: 0 auto; padding-bottom: 4rem; }
   .brand img { width: 24px; height: 24px; }
   .sync .lbl { display: none; }
   .sync { padding: 8px; }
-  .sync .count { display: inline; }
+  .topbar .sync .count { display: inline; }
   .userbtn .who { display: none; }
   .userbtn { width: 40px; height: 40px; justify-content: center; padding: 0; }
   .topbar-right { padding-right: 10px; gap: 6px; }
@@ -307,6 +307,10 @@ tr.click:hover td { background: var(--panel-2); }
 .scale button.on { background: var(--teal); border-top-color: var(--cyan); color: #fff; }
 .scale button:disabled { cursor: default; filter: none; }
 @media (max-width: 600px) { .scale { grid-template-columns: repeat(6, 1fr); } }
+.judge-nav { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: -4px 0 14px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.judge-nav .pos { font-size: 14px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; color: var(--muted); font-stretch: 75%; font-variation-settings: "wdth" 75; }
+.judge-nav .btn { min-width: 96px; }
+#scoreform { scroll-margin-top: 68px; }
 .total-bar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; padding: 14px 16px; margin-top: 14px; background: var(--panel-2); border-left: 3px solid var(--cyan); }
 .total-bar .t { font-size: 40px; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
 .banner { padding: 10px 14px; margin-bottom: 12px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; background: var(--panel-2); border-left: 4px solid var(--line-2); }
