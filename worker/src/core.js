@@ -1,20 +1,45 @@
 /*
- * Contest logic shared by the Cloudflare Worker (Durable Object) and the local dev server.
+ * Spotlight contest logic, shared by the Cloudflare Worker (Durable Object) and the local dev server.
  * Uses only Web-standard APIs (WebCrypto, Request/Response), so it runs anywhere.
  *
- * Responsibilities: accounts & sessions, role permissions, offline sync protocol,
- * audit log, public stage snapshot, and import/export of the full database snapshot
- * that is mirrored to the private GitHub data repo.
+ * Model
+ *   - Several contests run side by side. Each has its own settings, criteria, contestants/entries,
+ *     scores and stage. Types: 'cosplay' (stage walk with timer) and 'makers' (judged at tables).
+ *   - Accounts have a global role ('admin' sees and manages everything, or 'member') plus a role
+ *     per contest: lead · coordinator · judge · viewer. No role in a contest = can't see it at all.
+ *   - Devices sync with a revision-based protocol; every record a user may not see is filtered
+ *     out on the server before it leaves.
  */
 
-export const ROLES = ['admin', 'coordinator', 'judge'];
-export const COLLS = ['settings', 'criteria', 'participants', 'scores', 'stage'];
+export const GLOBAL_ROLES = ['admin', 'member'];
+export const CONTEST_ROLES = ['lead', 'coordinator', 'judge', 'viewer'];
+export const CONTEST_TYPES = ['cosplay', 'makers'];
+export const COLLS = ['settings', 'contests', 'criteria', 'participants', 'scores', 'stage'];
 const STATUSES = ['registered', 'checked_in', 'on_stage', 'done', 'no_show'];
 const STAGE_STATES = ['idle', 'ready', 'running', 'paused', 'finished'];
 const TOKEN_TTL_MS = 14 * 24 * 3600 * 1000;
 const PBKDF2_ITER = 50000; // Cloudflare caps PBKDF2 at 100k; 50k keeps logins inside free-plan CPU limits
 const AUDIT_CHUNK = 500;
+export const SCHEMA = 2;
 export const SNAPSHOT_FORMAT = 'contest-judging/1';
+
+export const DEFAULTS = {
+  cosplay: {
+    divisions: ['Novice', 'Journeyman', 'Master'],
+    criteria: [['Craftsmanship', 'Construction quality, detail, finishing'],
+      ['Accuracy / Interpretation', 'Faithfulness to source or strength of original design'],
+      ['Stage Presence', 'Performance, posing, character embodiment'],
+      ['Overall Impact', 'Wow factor and audience impression']],
+  },
+  makers: {
+    divisions: ['Props', 'Armor', 'Wearables', 'Other'],
+    criteria: [['Craftsmanship', 'Build quality, precision, durability'],
+      ['Technique & Difficulty', 'Skills used and how hard they are to pull off'],
+      ['Creativity & Design', 'Originality, problem solving, design choices'],
+      ['Finish & Detail', 'Paint, weathering, surface work, small details'],
+      ['Presentation', 'Documentation, display, how the maker explains the work']],
+  },
+};
 
 // ---------------------------------------------------------------- crypto helpers
 const enc = new TextEncoder();
@@ -67,9 +92,7 @@ async function readBody(req) {
   if (!text) return {};
   try { return JSON.parse(text); } catch { throw new HttpError(400, 'Invalid JSON'); }
 }
-function publicUser(u) {
-  return { id: u.id, username: u.username, displayName: u.displayName, role: u.role, active: u.active, mustChangePassword: !!u.mustChangePassword, rev: u.rev };
-}
+const strip = (rec, ...keys) => { const o = { ...rec }; for (const k of keys) delete o[k]; return o; };
 
 // ---------------------------------------------------------------- the contest database
 /**
@@ -83,7 +106,7 @@ export class Contest {
     this.db = null;
     this.dirty = new Set();
     this.loginFails = new Map();
-    this.flags = { rev: false, stage: false };
+    this.flags = { rev: false, stages: new Set() };
   }
 
   get rev() { return this.db ? this.db.rev : 0; }
@@ -94,7 +117,7 @@ export class Contest {
     const got = await this.store.get(base);
     const meta = got.get('meta');
     if (!meta) return false;
-    const db = { rev: meta.rev, users: got.get('users') || {}, sessions: got.get('sessions') || {}, audit: [], data: {} };
+    const db = { rev: meta.rev, schema: meta.schema || 1, users: got.get('users') || {}, sessions: got.get('sessions') || {}, audit: [], data: {} };
     for (const c of COLLS) db.data[c] = got.get('c:' + c) || {};
     const chunks = meta.auditChunks || 0;
     if (chunks) {
@@ -105,13 +128,14 @@ export class Contest {
     const now = Date.now();
     for (const [k, s] of Object.entries(db.sessions)) if (s.expires < now) { delete db.sessions[k]; this.dirty.add('sessions'); }
     this.db = db;
+    if (this.migrate()) await this.save();
     return true;
   }
 
   async save() {
     if (!this.dirty.size) return;
     const db = this.db;
-    const out = { meta: { rev: db.rev, version: 1, auditChunks: Math.ceil(db.audit.length / AUDIT_CHUNK) } };
+    const out = { meta: { rev: db.rev, version: 1, schema: db.schema, auditChunks: Math.ceil(db.audit.length / AUDIT_CHUNK) } };
     for (const key of this.dirty) {
       if (key === 'users') out.users = db.users;
       else if (key === 'sessions') out.sessions = db.sessions;
@@ -127,44 +151,86 @@ export class Contest {
     for (let i = 0; i < Math.ceil(this.db.audit.length / AUDIT_CHUNK); i++) this.dirty.add('audit:' + i);
   }
 
+  /**
+   * Schema 1 (one contest) → schema 2 (many contests). The single contest becomes contest "main",
+   * every record gets its contestId, and judge/coordinator accounts keep that role inside it.
+   */
+  migrate() {
+    const db = this.db;
+    if ((db.schema || 1) >= SCHEMA) return false;
+    const now = Date.now();
+    const rev = ++db.rev;
+    const stamp = r => Object.assign(r, { rev, updatedAt: now });
+    for (const c of COLLS) db.data[c] = db.data[c] || {};
+    const ev = db.data.settings.event || {};
+    const cid = 'main';
+    db.data.contests[cid] = stamp({
+      id: cid, name: ev.name || 'Cosplay Contest', type: 'cosplay',
+      stageSeconds: ev.stageSeconds ?? 90, warnSeconds: ev.warnSeconds ?? 15,
+      divisions: ev.divisions || DEFAULTS.cosplay.divisions, scoresLocked: !!ev.scoresLocked, order: 1, updatedBy: 'system',
+    });
+    db.data.settings.event = stamp({ id: 'event', name: '', updatedBy: 'system' });
+    for (const coll of ['criteria', 'participants', 'scores']) for (const r of Object.values(db.data[coll])) stamp(Object.assign(r, { contestId: cid }));
+    const old = db.data.stage.current;
+    db.data.stage = { [cid]: stamp({ ...(old || { state: 'idle', durationMs: 90000, remainingMs: 90000 }), id: cid, contestId: cid }) };
+    for (const u of Object.values(db.users)) {
+      if (u.role === 'admin') { u.contests = u.contests || {}; }
+      else { u.contests = { [cid]: CONTEST_ROLES.includes(u.role) ? u.role : 'viewer' }; u.role = 'member'; }
+      u.rev = rev;
+    }
+    for (const a of db.audit) if (!a.contestId && (a.participantId || a.action.startsWith('participant') || a.action.startsWith('score'))) a.contestId = cid;
+    db.schema = SCHEMA;
+    this.markAllDirty();
+    this.flags.rev = true;
+    return true;
+  }
+
   async seed(adminPassword) {
     if (!adminPassword || String(adminPassword).length < 8) throw new Error('ADMIN_PASSWORD secret must be set (8+ characters) before first start');
     const now = Date.now();
-    const db = this.db = { rev: 0, users: {}, sessions: {}, audit: [], data: Object.fromEntries(COLLS.map(c => [c, {}])) };
-    const put = (coll, rec) => { db.rev++; db.data[coll][rec.id] = { ...rec, rev: db.rev, updatedAt: now, updatedBy: 'system' }; };
-    put('settings', { id: 'event', name: 'Cosplay Contest', stageSeconds: 90, warnSeconds: 15, divisions: ['Novice', 'Journeyman', 'Master'], scoresLocked: false });
-    [['Craftsmanship', 'Construction quality, detail, finishing'],
-      ['Accuracy / Interpretation', 'Faithfulness to source or strength of original design'],
-      ['Stage Presence', 'Performance, posing, character embodiment'],
-      ['Overall Impact', 'Wow factor and audience impression']]
-      .forEach(([name, description], i) => put('criteria', { id: 'c' + (i + 1), name, description, max: 10, weight: 1, order: i + 1 }));
-    put('stage', { id: 'current', participantId: null, nextParticipantId: null, state: 'idle', durationMs: 90000, startedAt: null, remainingMs: 90000 });
+    this.db = { rev: 0, schema: SCHEMA, users: {}, sessions: {}, audit: [], data: Object.fromEntries(COLLS.map(c => [c, {}])) };
+    const db = this.db;
+    db.data.settings.event = { id: 'event', name: '', rev: ++db.rev, updatedAt: now, updatedBy: 'system' };
+    this.createContest({ id: 'main', name: 'Cosplay Contest', type: 'cosplay' }, 'system');
     const id = newId();
-    db.rev++;
-    db.users[id] = { id, username: 'admin', displayName: 'Administrator', role: 'admin', ...(await hashPassword(adminPassword)), active: true, mustChangePassword: true, createdAt: now, rev: db.rev };
+    db.users[id] = { id, username: 'admin', displayName: 'Administrator', role: 'admin', contests: {}, ...(await hashPassword(adminPassword)), active: true, mustChangePassword: true, createdAt: now, rev: ++db.rev };
     this.markAllDirty();
     await this.save();
   }
 
+  /** New contest with its default divisions, criteria and (cosplay) stage. */
+  createContest({ id = newId(), name, type = 'cosplay' }, by) {
+    const db = this.db, now = Date.now();
+    const d = DEFAULTS[type] || DEFAULTS.cosplay;
+    const put = (coll, rec) => { db.data[coll][rec.id] = { ...rec, rev: this.bump(), updatedAt: now, updatedBy: by }; this.dirty.add('c:' + coll); };
+    const order = Object.values(db.data.contests).length + 1;
+    put('contests', { id, name: str(name, 120) || 'New contest', type, stageSeconds: 90, warnSeconds: 15, divisions: d.divisions, scoresLocked: false, order, createdAt: now });
+    d.criteria.forEach(([cname, description], i) => put('criteria', { id: `${id}-c${i + 1}`, contestId: id, name: cname, description, max: 10, weight: 1, order: i + 1 }));
+    put('stage', { id, contestId: id, participantId: null, nextParticipantId: null, state: 'idle', durationMs: 90000, startedAt: null, remainingMs: 90000 });
+    return id;
+  }
+
   /** Full database for the GitHub mirror. Sessions are never exported. */
   snapshot() {
-    const { rev, data, users, audit } = this.db;
-    return { format: SNAPSHOT_FORMAT, exportedAt: new Date().toISOString(), rev, data, users, audit };
+    const { rev, schema, data, users, audit } = this.db;
+    return { format: SNAPSHOT_FORMAT, schema, exportedAt: new Date().toISOString(), rev, data, users, audit };
   }
 
   async importSnapshot(snap, { keepSessions = false } = {}) {
     if (!snap || snap.format !== SNAPSHOT_FORMAT || !snap.data || !snap.users) throw new Error('Not a contest-judging snapshot');
     const sessions = keepSessions && this.db ? this.db.sessions : {};
     const prevRev = this.db ? this.db.rev : 0;
-    const db = { rev: Math.max(Number(snap.rev) || 0, prevRev) + 1, users: snap.users, sessions, audit: Array.isArray(snap.audit) ? snap.audit : [], data: {} };
+    const db = { rev: Math.max(Number(snap.rev) || 0, prevRev) + 1, schema: snap.schema || 1, users: snap.users, sessions, audit: Array.isArray(snap.audit) ? snap.audit : [], data: {} };
     for (const c of COLLS) db.data[c] = snap.data[c] || {};
     // Bump every record so connected devices re-pull the restored copy.
     for (const c of COLLS) for (const r of Object.values(db.data[c])) r.rev = db.rev;
     for (const u of Object.values(db.users)) u.rev = db.rev;
     for (const [k, s] of Object.entries(sessions)) if (!db.users[s.userId]?.active) delete sessions[k];
     this.db = db;
+    this.migrate();
     this.markAllDirty();
-    this.flags.rev = this.flags.stage = true;
+    this.flags.rev = true;
+    for (const id of Object.keys(db.data.contests)) this.flags.stages.add(id);
     await this.save();
   }
 
@@ -177,45 +243,72 @@ export class Contest {
     this.dirty.add('audit:' + Math.floor((this.db.audit.length - 1) / AUDIT_CHUNK));
   }
 
-  // ---------- permissions & projection
-  canWrite(user, coll) {
-    if (user.role === 'admin') return true;
-    if (user.role === 'coordinator') return coll === 'participants' || coll === 'stage';
-    if (user.role === 'judge') return coll === 'scores';
-    return false;
+  // ---------- who may do what
+  contest(cid) { const c = cid && this.db.data.contests[cid]; return c && !c.deleted ? c : null; }
+  roleIn(user, cid) {
+    if (!user) return null;
+    if (user.role === 'admin') return 'admin';
+    const r = (user.contests || {})[cid];
+    return CONTEST_ROLES.includes(r) && this.contest(cid) ? r : null;
+  }
+  manages(user, cid) { const r = this.roleIn(user, cid); return r === 'admin' || r === 'lead'; }
+  ledContests(user) {
+    if (user.role === 'admin') return null; // all
+    return Object.entries(user.contests || {}).filter(([cid, r]) => r === 'lead' && this.contest(cid)).map(([cid]) => cid);
+  }
+  publicUser(u, onlyContests) {
+    const contests = {};
+    for (const [cid, r] of Object.entries(u.contests || {})) if (!onlyContests || onlyContests.includes(cid)) contests[cid] = r;
+    return { id: u.id, username: u.username, displayName: u.displayName, role: u.role, contests, active: u.active, mustChangePassword: !!u.mustChangePassword, rev: u.rev };
   }
 
+  /** What a user may see of a record. null = nothing at all. */
   project(user, coll, rec) {
     if (user.role === 'admin') return rec;
-    if (coll === 'scores') {
-      if (user.role !== 'judge' || rec.judgeId !== user.id) return null;
-      const { reason, ...rest } = rec;
-      return rest;
+    if (coll === 'settings') return rec;
+    const cid = coll === 'contests' ? rec.id : rec.contestId;
+    const r = this.roleIn(user, cid);
+    if (!r) return null;
+    switch (coll) {
+      case 'contests': case 'criteria': case 'stage': return rec;
+      case 'participants':
+        if (r === 'lead' || r === 'coordinator') return rec;
+        if (r === 'viewer') return strip(rec, 'notes', 'contact');
+        if (r === 'judge') {
+          const visible = !rec.deleted && rec.checkedIn && rec.status !== 'no_show';
+          return visible ? strip(rec, 'notes', 'contact') : { id: rec.id, rev: rec.rev, contestId: rec.contestId, hidden: true };
+        }
+        return null;
+      case 'scores':
+        if (r === 'lead') return rec;
+        if (r === 'viewer') return strip(rec, 'comment', 'reason');
+        if (r === 'judge' && rec.judgeId === user.id) return strip(rec, 'reason');
+        return null;
     }
-    if (coll === 'participants') {
-      if (user.role === 'coordinator') return rec;
-      const visible = !rec.deleted && rec.checkedIn && rec.status !== 'no_show';
-      if (!visible) return { id: rec.id, rev: rec.rev, hidden: true };
-      const { notes, contact, ...rest } = rec;
-      return rest;
-    }
-    return rec;
+    return null;
   }
 
-  cleanPatch(coll, patch, user) {
+  cleanPatch(coll, patch) {
     const p = {};
     const has = k => Object.prototype.hasOwnProperty.call(patch, k);
     if (has('deleted')) p.deleted = !!patch.deleted;
     switch (coll) {
       case 'settings':
         if (has('name')) p.name = str(patch.name, 120);
+        delete p.deleted;
+        break;
+      case 'contests':
+        if (has('name')) p.name = str(patch.name, 120);
+        if (has('type') && CONTEST_TYPES.includes(patch.type)) p.type = patch.type;
         if (has('stageSeconds')) p.stageSeconds = Math.round(num(patch.stageSeconds, 5, 3600, 90));
         if (has('warnSeconds')) p.warnSeconds = Math.round(num(patch.warnSeconds, 0, 600, 15));
         if (has('divisions') && Array.isArray(patch.divisions)) p.divisions = patch.divisions.map(x => str(x, 60)).filter(Boolean).slice(0, 30);
         if (has('scoresLocked')) p.scoresLocked = !!patch.scoresLocked;
-        delete p.deleted;
+        if (has('order')) p.order = num(patch.order, -1e6, 1e6, 0);
+        if (has('archived')) p.archived = !!patch.archived;
         break;
       case 'criteria':
+        if (has('contestId')) p.contestId = str(patch.contestId, 64);
         if (has('name')) p.name = str(patch.name, 80);
         if (has('description')) p.description = str(patch.description, 300);
         if (has('max')) p.max = Math.round(num(patch.max, 1, 100, 10));
@@ -223,13 +316,13 @@ export class Contest {
         if (has('order')) p.order = num(patch.order, -1e6, 1e6, 0);
         break;
       case 'participants':
-        for (const k of ['number', 'name', 'character', 'series', 'division', 'judgeNotes', 'notes', 'contact']) {
+        if (has('contestId')) p.contestId = str(patch.contestId, 64);
+        for (const k of ['number', 'name', 'character', 'series', 'title', 'materials', 'division', 'judgeNotes', 'notes', 'contact']) {
           if (has(k)) p[k] = str(patch[k], k.endsWith('otes') ? 2000 : 200);
         }
         if (has('status') && STATUSES.includes(patch.status)) p.status = patch.status;
         if (has('checkedIn')) p.checkedIn = !!patch.checkedIn;
         if (has('order')) p.order = num(patch.order, -1e9, 1e9, 0);
-        if (p.deleted && user.role !== 'admin') throw new HttpError(403, 'Only admins can delete participants');
         break;
       case 'scores':
         if (has('values') && patch.values && typeof patch.values === 'object') {
@@ -264,34 +357,60 @@ export class Contest {
     const coll = ch && ch.coll;
     const id = ch && typeof ch.id === 'string' ? ch.id.slice(0, 140) : null;
     if (!COLLS.includes(coll) || !id) return { ok: false, reason: 'invalid change' };
-    if (!this.canWrite(user, coll)) return { ok: false, reason: 'not permitted for your role' };
-    if (coll === 'settings' && id !== 'event') return { ok: false, reason: 'invalid settings id' };
-    if (coll === 'stage' && id !== 'current') return { ok: false, reason: 'invalid stage id' };
-
     const store = db.data[coll];
     const existing = store[id];
-    let patch;
-    try { patch = this.cleanPatch(coll, ch.patch || {}, user); } catch (e) { return { ok: false, reason: e.message }; }
+    const patch = this.cleanPatch(coll, ch.patch || {});
     const before = existing ? JSON.parse(JSON.stringify(existing)) : null;
+    const denied = { ok: false, reason: 'not permitted for your role in this contest' };
 
-    if (coll === 'scores') {
+    // ---- which contest does this change belong to, and may this user touch it?
+    let cid = null;
+    if (coll === 'settings') {
+      if (id !== 'event') return { ok: false, reason: 'invalid settings id' };
+      if (user.role !== 'admin') return denied;
+    } else if (coll === 'contests') {
+      cid = id;
+      if (!existing) {
+        if (user.role !== 'admin') return denied;
+        this.createContest({ id, name: patch.name, type: patch.type || 'cosplay' }, user.id);
+        this.audit(user, 'contest.create', { contestId: id, label: `${patch.name || 'New contest'} (${patch.type || 'cosplay'})` });
+        this.flags.stages.add(id);
+        return { ok: true };
+      }
+      if (!this.manages(user, cid)) return denied;
+      if ((patch.deleted !== undefined || patch.archived !== undefined) && user.role !== 'admin') return { ok: false, reason: 'only admins can archive or delete contests' };
+    } else if (coll === 'scores') {
       const sep = id.indexOf('__');
       if (sep < 1) return { ok: false, reason: 'invalid score id' };
       const participantId = id.slice(0, sep), judgeId = id.slice(sep + 2);
-      if (user.role === 'judge') {
+      const part = db.data.participants[participantId];
+      cid = part && part.contestId;
+      const c = this.contest(cid);
+      if (!c) return { ok: false, reason: 'contest not found' };
+      const r = this.roleIn(user, cid);
+      if (r === 'judge') {
         if (judgeId !== user.id) return { ok: false, reason: 'judges can only score as themselves' };
-        if (db.data.settings.event.scoresLocked) return { ok: false, reason: 'scoring is locked', current: existing ? this.project(user, coll, existing) : undefined };
-        const part = db.data.participants[participantId];
-        if (!part || part.deleted || !part.checkedIn) return { ok: false, reason: 'contestant is not checked in' };
+        if (c.scoresLocked) return { ok: false, reason: 'scoring is locked', current: existing ? this.project(user, coll, existing) : undefined };
+        if (part.deleted || !part.checkedIn) return { ok: false, reason: 'contestant is not checked in' };
         delete patch.reason;
-      }
+      } else if (r === 'admin' || r === 'lead') {
+        if (judgeId !== user.id && !patch.reason) return { ok: false, reason: 'a reason is required when editing another judge\'s score' };
+      } else return denied;
       if (existing && existing.rev > (Number(ch.baseRev) || 0) && existing.updatedBy !== user.id) {
         return { ok: false, reason: 'changed by ' + (db.users[existing.updatedBy]?.displayName || 'another user'), current: this.project(user, coll, existing) };
       }
-      if (user.role === 'admin' && judgeId !== user.id && !patch.reason) return { ok: false, reason: 'a reason is required when editing another judge\'s score' };
-      patch.participantId = participantId;
-      patch.judgeId = judgeId;
+      Object.assign(patch, { participantId, judgeId, contestId: cid });
       if (existing && existing.values && patch.values) patch.values = { ...existing.values, ...patch.values };
+    } else {
+      // criteria, participants, stage
+      cid = coll === 'stage' ? id : (existing ? existing.contestId : patch.contestId);
+      if (!this.contest(cid)) return { ok: false, reason: 'contest not found' };
+      if (existing) patch.contestId = existing.contestId; // records never move between contests
+      else patch.contestId = cid;
+      const r = this.roleIn(user, cid);
+      const ok = coll === 'criteria' ? (r === 'admin' || r === 'lead') : (r === 'admin' || r === 'lead' || r === 'coordinator');
+      if (!ok) return denied;
+      if (coll === 'participants' && patch.deleted && !(r === 'admin' || r === 'lead')) return { ok: false, reason: 'only a contest lead or admin can delete entries' };
     }
 
     if (coll === 'participants') {
@@ -311,18 +430,22 @@ export class Contest {
     store[id] = rec;
     this.dirty.add('c:' + coll);
 
-    if (coll === 'scores' && user.role === 'admin' && rec.judgeId !== user.id) {
-      this.audit(user, 'score.edit', { target: id, participantId: rec.participantId, judgeId: rec.judgeId, reason: patch.reason, before: before && { values: before.values, comment: before.comment, submitted: before.submitted, deleted: before.deleted }, after: { values: rec.values, comment: rec.comment, submitted: rec.submitted, deleted: rec.deleted } });
+    // Audit trail
+    const label = p => (p.title ? `#${p.number || '?'} ${p.title}` : `#${p.number || '?'} ${p.name || ''}`);
+    if (coll === 'scores' && rec.judgeId !== user.id) {
+      this.audit(user, 'score.edit', { contestId: cid, target: id, participantId: rec.participantId, judgeId: rec.judgeId, reason: patch.reason, before: before && { values: before.values, comment: before.comment, submitted: before.submitted, deleted: before.deleted }, after: { values: rec.values, comment: rec.comment, submitted: rec.submitted, deleted: rec.deleted } });
     } else if (coll === 'scores' && patch.submitted === true && !(before && before.submitted)) {
-      this.audit(user, 'score.submit', { target: id, participantId: rec.participantId, judgeId: rec.judgeId, after: { values: rec.values } });
+      this.audit(user, 'score.submit', { contestId: cid, target: id, participantId: rec.participantId, judgeId: rec.judgeId, after: { values: rec.values } });
     } else if (coll === 'participants' && patch.checkedIn !== undefined && (!before || !!before.checkedIn !== !!rec.checkedIn)) {
-      this.audit(user, rec.checkedIn ? 'participant.checkin' : 'participant.checkout', { target: id, label: `#${rec.number || '?'} ${rec.name || ''}` });
+      this.audit(user, rec.checkedIn ? 'participant.checkin' : 'participant.checkout', { contestId: cid, target: id, label: label(rec) });
     } else if (coll === 'participants' && patch.deleted) {
-      this.audit(user, 'participant.delete', { target: id, label: `#${rec.number || '?'} ${rec.name || ''}` });
-    } else if (coll === 'settings' || coll === 'criteria') {
-      this.audit(user, coll + '.update', { target: id, after: patch });
+      this.audit(user, 'participant.delete', { contestId: cid, target: id, label: label(rec) });
+    } else if (coll === 'contests' || coll === 'criteria' || coll === 'settings') {
+      const p2 = { ...patch }; delete p2.contestId;
+      this.audit(user, coll + '.update', { contestId: cid, target: id, after: p2 });
     }
-    if (coll === 'stage' || coll === 'participants' || coll === 'settings') this.flags.stage = true;
+    if (coll === 'stage' || coll === 'participants' || coll === 'contests') this.flags.stages.add(cid);
+    if (coll === 'settings') for (const c of Object.keys(db.data.contests)) this.flags.stages.add(c);
     return { ok: true };
   }
 
@@ -331,24 +454,37 @@ export class Contest {
     for (const coll of COLLS) for (const rec of Object.values(this.db.data[coll])) {
       if (rec.rev > since) { const p = this.project(user, coll, rec); if (p) out.push({ coll, rec: p }); }
     }
-    if (user.role === 'admin') {
-      for (const u of Object.values(this.db.users)) if (u.rev > since) out.push({ coll: 'users', rec: publicUser(u) });
-      for (const a of this.db.audit) if ((a.rev || 0) > since) out.push({ coll: 'audit', rec: a });
+    // Accounts: admins see all; leads and viewers see who is in their contests (for judge counts and names).
+    const isAdmin = user.role === 'admin';
+    const seeing = isAdmin ? null : Object.entries(user.contests || {}).filter(([cid, r]) => (r === 'lead' || r === 'viewer') && this.contest(cid)).map(([cid]) => cid);
+    if (isAdmin || seeing.length) {
+      for (const u of Object.values(this.db.users)) {
+        if (u.rev <= since) continue;
+        if (isAdmin) out.push({ coll: 'users', rec: this.publicUser(u) });
+        else if (u.id === user.id || seeing.some(cid => (u.contests || {})[cid])) out.push({ coll: 'users', rec: this.publicUser(u, seeing) });
+      }
+    }
+    const led = this.ledContests(user);
+    if (led === null || led.length) {
+      for (const a of this.db.audit) if ((a.rev || 0) > since && (led === null || led.includes(a.contestId))) out.push({ coll: 'audit', rec: a });
     }
     return out;
   }
 
-  stagePublic() {
-    const s = this.db.data.stage.current || {};
+  stagePublic(cid) {
+    const c = this.contest(cid);
+    if (!c) return null;
+    const s = this.db.data.stage[cid] || {};
     const ev = this.db.data.settings.event || {};
     const pick = id => {
       const p = id && this.db.data.participants[id];
-      if (!p || p.deleted) return null;
+      if (!p || p.deleted || p.contestId !== cid) return null;
       return { number: p.number, name: p.name, character: p.character, series: p.series, division: p.division };
     };
     return {
-      eventName: ev.name, warnSeconds: ev.warnSeconds, state: s.state, durationMs: s.durationMs, startedAt: s.startedAt,
-      remainingMs: s.remainingMs, seq: s.seq || 0, current: pick(s.participantId), next: pick(s.nextParticipantId), serverTime: Date.now(),
+      contestId: cid, contestName: c.name, eventName: ev.name || '', type: c.type, warnSeconds: c.warnSeconds,
+      state: s.state, durationMs: s.durationMs, startedAt: s.startedAt, remainingMs: s.remainingMs, seq: s.seq || 0,
+      current: pick(s.participantId), next: pick(s.nextParticipantId), serverTime: Date.now(),
     };
   }
 
@@ -381,10 +517,19 @@ export class Contest {
     this.loginFails.set(key, { count: n, until: n >= 5 ? Date.now() + 60000 : 0 });
     if (this.loginFails.size > 5000) this.loginFails.clear();
   }
+  cleanContestRoles(map, base = {}) {
+    const out = { ...base };
+    for (const [cid, r] of Object.entries(map || {})) {
+      if (!this.db.data.contests[cid]) continue;
+      if (r === null || r === '' || r === 'none') delete out[cid];
+      else if (CONTEST_ROLES.includes(r)) out[cid] = r;
+    }
+    return out;
+  }
 
   // ---------- request handling
   async handle(req, ip = '') {
-    this.flags = { rev: false, stage: false };
+    this.flags = { rev: false, stages: new Set() };
     let res;
     try {
       res = await this.route(req, ip);
@@ -393,9 +538,14 @@ export class Contest {
       res = json(e.status || 500, { error: e instanceof HttpError ? e.message : 'Server error' });
     }
     await this.save();
-    if (this.flags.rev && this.hooks.broadcast) this.hooks.broadcast('rev', { rev: this.db.rev });
-    if (this.flags.stage && this.hooks.broadcast) this.hooks.broadcast('stage', this.stagePublic());
+    this.broadcastFlags();
     return res;
+  }
+  broadcastFlags() {
+    if (!this.hooks.broadcast) return;
+    if (this.flags.rev) this.hooks.broadcast('rev', { rev: this.db.rev });
+    for (const cid of this.flags.stages) { const s = this.stagePublic(cid); if (s) this.hooks.broadcast('stage', s); }
+    this.flags = { rev: false, stages: new Set() };
   }
 
   async route(req, ip) {
@@ -403,8 +553,12 @@ export class Contest {
     const route = req.method + ' ' + url.pathname;
     const db = this.db;
 
-    if (route === 'GET /api/health') return json(200, { ok: true, rev: db.rev, serverTime: Date.now() });
-    if (route === 'GET /api/stage') return json(200, this.stagePublic());
+    if (route === 'GET /api/health') return json(200, { ok: true, rev: db.rev, schema: db.schema, serverTime: Date.now() });
+    if (route === 'GET /api/stage') {
+      const cid = url.searchParams.get('contest') || Object.keys(db.data.contests).find(id => this.contest(id)?.type === 'cosplay');
+      const s = this.stagePublic(cid);
+      return s ? json(200, s) : json(404, { error: 'No such contest' });
+    }
 
     if (route === 'POST /api/login') {
       const { username, password } = await readBody(req);
@@ -420,7 +574,7 @@ export class Contest {
       const token = randomToken();
       db.sessions[await sha256(token)] = { userId: u.id, expires: Date.now() + TOKEN_TTL_MS };
       this.dirty.add('sessions');
-      return json(200, { token, user: publicUser(u), serverTime: Date.now() });
+      return json(200, { token, user: this.publicUser(u), serverTime: Date.now() });
     }
 
     if (route === 'POST /api/logout') {
@@ -431,7 +585,7 @@ export class Contest {
 
     if (route === 'GET /api/me') {
       const u = await this.requireUser(req);
-      return json(200, { user: publicUser(u), serverTime: Date.now() });
+      return json(200, { user: this.publicUser(u), serverTime: Date.now() });
     }
 
     if (route === 'POST /api/password') {
@@ -441,12 +595,11 @@ export class Contest {
       if (String(newPassword || '').length < 8) throw new HttpError(400, 'New password must be at least 8 characters');
       if (newPassword === currentPassword) throw new HttpError(400, 'Choose a different password');
       Object.assign(u, await hashPassword(newPassword), { mustChangePassword: false, rev: this.bump() });
-      // Sign out everywhere else, keep this device signed in.
       const keep = await sha256((req.headers.get('Authorization') || '').slice(7));
       for (const [k, s] of Object.entries(db.sessions)) if (s.userId === u.id && k !== keep) delete db.sessions[k];
       this.dirty.add('users'); this.dirty.add('sessions');
       this.audit(u, 'user.password', { target: u.id });
-      return json(200, { ok: true, user: publicUser(u) });
+      return json(200, { ok: true, user: this.publicUser(u) });
     }
 
     if (route === 'POST /api/sync') {
@@ -458,27 +611,27 @@ export class Contest {
         results.push({ key: ch && ch.key, coll: ch && ch.coll, id: ch && ch.id, ...this.applyChange(u, ch) });
       }
       const reset = since > db.rev;
-      return json(200, { rev: db.rev, reset, results, changes: this.pull(u, reset ? 0 : since), user: publicUser(u), serverTime: Date.now() });
+      return json(200, { rev: db.rev, schema: db.schema, reset, results, changes: this.pull(u, reset ? 0 : since), user: this.publicUser(u), serverTime: Date.now() });
     }
 
-    // ---- admin: accounts
+    // ---- admin: accounts and access
     if (route === 'GET /api/users') {
       await this.requireUser(req, 'admin');
-      return json(200, { users: Object.values(db.users).map(publicUser) });
+      return json(200, { users: Object.values(db.users).map(u => this.publicUser(u)) });
     }
     if (route === 'POST /api/users') {
       const admin = await this.requireUser(req, 'admin');
-      const { username, displayName, role, password } = await readBody(req);
+      const { username, displayName, role, password, contests } = await readBody(req);
       const uname = String(username || '').trim();
       if (!/^[a-zA-Z0-9._-]{2,40}$/.test(uname)) throw new HttpError(400, 'Username: 2–40 letters, numbers, . _ -');
       if (Object.values(db.users).some(x => x.username.toLowerCase() === uname.toLowerCase())) throw new HttpError(400, 'That username is taken');
-      if (!ROLES.includes(role)) throw new HttpError(400, 'Invalid role');
+      const grole = role === 'admin' ? 'admin' : 'member';
       if (String(password || '').length < 8) throw new HttpError(400, 'Password must be at least 8 characters');
       const id = newId();
-      db.users[id] = { id, username: uname, displayName: str(displayName || uname, 80), role, ...(await hashPassword(password)), active: true, mustChangePassword: true, createdAt: Date.now(), rev: this.bump() };
+      db.users[id] = { id, username: uname, displayName: str(displayName || uname, 80), role: grole, contests: this.cleanContestRoles(contests), ...(await hashPassword(password)), active: true, mustChangePassword: true, createdAt: Date.now(), rev: this.bump() };
       this.dirty.add('users');
-      this.audit(admin, 'user.create', { target: id, label: `${uname} (${role})` });
-      return json(200, { user: publicUser(db.users[id]) });
+      this.audit(admin, 'user.create', { target: id, label: `${uname} (${grole}${Object.keys(db.users[id].contests).length ? ', ' + Object.entries(db.users[id].contests).map(([c, r]) => `${db.data.contests[c].name}: ${r}`).join(', ') : ''})` });
+      return json(200, { user: this.publicUser(db.users[id]) });
     }
     const um = url.pathname.match(/^\/api\/users\/([\w-]+)$/);
     if (um && req.method === 'PATCH') {
@@ -490,9 +643,13 @@ export class Contest {
       const changes = [];
       if (body.displayName !== undefined) { u.displayName = str(body.displayName, 80) || u.username; changes.push('name'); }
       if (body.role !== undefined) {
-        if (!ROLES.includes(body.role)) throw new HttpError(400, 'Invalid role');
-        if (u.role === 'admin' && body.role !== 'admin' && admins.length <= 1) throw new HttpError(400, 'Keep at least one active admin');
-        u.role = body.role; changes.push('role=' + body.role);
+        const grole = body.role === 'admin' ? 'admin' : 'member';
+        if (u.role === 'admin' && grole !== 'admin' && admins.length <= 1) throw new HttpError(400, 'Keep at least one active admin');
+        u.role = grole; changes.push(grole === 'admin' ? 'made admin' : 'admin removed');
+      }
+      if (body.contests !== undefined) {
+        u.contests = this.cleanContestRoles(body.contests, u.contests || {});
+        changes.push('access: ' + (Object.entries(body.contests).map(([c, r]) => `${db.data.contests[c]?.name || c} → ${r || 'none'}`).join(', ') || 'none'));
       }
       if (body.active !== undefined) {
         if (!body.active && u.role === 'admin' && admins.length <= 1) throw new HttpError(400, 'Keep at least one active admin');
@@ -503,18 +660,18 @@ export class Contest {
         Object.assign(u, await hashPassword(body.password), { mustChangePassword: true });
         changes.push('password reset');
       }
-      if (!u.active || body.password || body.role !== undefined) this.dropSessions(u.id);
+      if (!u.active || body.password) this.dropSessions(u.id);
       u.rev = this.bump();
       this.dirty.add('users');
-      this.audit(admin, 'user.update', { target: u.id, label: `${u.username}: ${changes.join(', ')}` });
-      return json(200, { user: publicUser(u) });
+      this.audit(admin, 'user.update', { target: u.id, label: `${u.username}: ${changes.join('; ')}` });
+      return json(200, { user: this.publicUser(u) });
     }
 
     if (route === 'GET /api/backup') {
       await this.requireUser(req, 'admin');
       const snap = this.snapshot();
-      snap.users = Object.values(db.users).map(publicUser); // downloaded backups never contain password hashes
-      return new Response(JSON.stringify(snap, null, 1), { headers: { 'Content-Type': 'application/json', 'Content-Disposition': `attachment; filename="contest-backup-${Date.now()}.json"`, 'Cache-Control': 'no-store' } });
+      snap.users = Object.values(db.users).map(u => this.publicUser(u)); // downloaded backups never contain password hashes
+      return new Response(JSON.stringify(snap, null, 1), { headers: { 'Content-Type': 'application/json', 'Content-Disposition': `attachment; filename="spotlight-backup-${Date.now()}.json"`, 'Cache-Control': 'no-store' } });
     }
 
     throw new HttpError(404, 'Unknown endpoint');

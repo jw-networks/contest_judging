@@ -97,6 +97,11 @@ h3::after { content: ""; flex: 1; height: 1px; background: rgba(92, 203, 233, .3
   font-stretch: 75%; font-variation-settings: "wdth" 75;
 }
 .brand img { width: 28px; height: 28px; flex: 0 0 auto; }
+button.brand { background: none; border: 0; color: inherit; text-align: left; cursor: pointer; font-family: var(--font); max-width: 46vw; }
+button.brand:hover:not(:disabled) #ev-name { color: var(--cyan); }
+button.brand:disabled { cursor: default; }
+#ev-name { display: block; }
+.switch-caret { width: 9px; height: 9px; flex: 0 0 auto; margin: -6px 2px 0 4px; border-right: 2px solid var(--cyan); border-bottom: 2px solid var(--cyan); transform: rotate(45deg); }
 .brand span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .nav { display: flex; align-items: stretch; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; }
 .nav::-webkit-scrollbar { display: none; }
@@ -136,6 +141,7 @@ main { padding: 18px; max-width: 1400px; margin: 0 auto; padding-bottom: 4rem; }
 .tabbar { display: none; }
 @media (max-width: 899px) {
   .topbar .nav { display: none; }
+  button.brand { max-width: calc(100vw - 130px); }
   body.has-tabs .tabbar {
     display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;
     position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;

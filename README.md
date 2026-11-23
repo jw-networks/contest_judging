@@ -60,28 +60,33 @@ Copy the token. You'll paste it in step 4.
 3. **Actions → "Deploy app to GitHub Pages" → Run workflow**
 
 ### 7. Sign in
-Open **https://jw-networks.github.io/contest_judging/** and sign in as `admin` with your `ADMIN_PASSWORD`. You'll be asked to choose a new password. Then go to **Setup** to set the event details and criteria, create accounts, and import contestants.
+Open **https://jw-networks.github.io/contest_judging/** and sign in as `admin` with your `ADMIN_PASSWORD`. You'll be asked to choose a new password. On the **Admin** page, create your contests and accounts. Then, in each contest's **Contest setup**, set its criteria, give people roles, and import contestants.
 
 On each tablet, open the same address and choose **Add to Home Screen / Install app**.
 
 After this, pushing changes to `public/` redeploys the app, and pushing changes to `worker/` redeploys the Worker, automatically.
 
-## Who sees what
+## Contests and who sees what
 
-| Screen | Admin | Coordinator | Judge |
-|---|:-:|:-:|:-:|
-| Check-in (search, check in, walk-ins, no-shows) | ✓ | ✓ | |
-| Stage control (running order, timer, next contestant) | ✓ | ✓ | |
-| Confidence monitor | ✓ | ✓ | |
-| Scoring (own sheets only, checked-in contestants only) | | | ✓ |
-| Results, lock scoring, CSV export, print | ✓ | | |
-| Score review and adjustment (reason required, audited) | ✓ | | |
-| Setup: event, criteria, accounts, import, GitHub copy | ✓ | | |
-| Audit log | ✓ | | |
+Spotlight runs **several contests side by side**, for example a Saturday masquerade, a kids' contest and a makers showcase. Each contest has its own contestants or entries, criteria, divisions or categories, scores, stage timer, results and audit log.
 
-The Worker enforces all of this. Judges never receive other judges' scores, staff notes, contact details, or contestants who haven't checked in. Coordinators never receive any scores.
+- **Cosplay contests** have a stage walk, with a timer, a running order and a confidence monitor (`…/#/monitor/<contest>`).
+- **Makers contests** are judged at tables. There's no stage or timer, and each entry has a title, maker, category and materials.
 
-The **confidence monitor** (`…/contest_judging/#/monitor`) needs no sign-in, so it can run on a screen facing the stage. It shows only the stage information: the contestant's number, name and character, the timer, and who's up next.
+Everyone signs in with one account. An **admin** sees and manages every contest and all accounts. Everyone else gets a **role per contest**, and a contest without a role is invisible to them:
+
+| Role in a contest | Can do |
+|---|---|
+| **Lead** | Runs that contest: its settings, criteria, contestants, check-in, stage, results, lock scoring, score fixes, audit log |
+| **Coordinator** | Check-in, adding walk-ins, stage control and the monitor |
+| **Judge** | Scores checked-in contestants. Sees only their own scores |
+| **Viewer** | Read-only: the contest's contestants and results. No private notes, judge comments or score breakdowns |
+
+Admins create contests and accounts on the **Admin** page. Each contest's **Contest setup** page has a "Who has access" list for choosing everyone's role in it. Removing someone's access takes effect at their next sync and clears that contest's data from their device. People in several contests switch between them from the contest name in the title bar.
+
+All of this is enforced by the Worker. A device only ever receives the records its account may see.
+
+The **confidence monitor** needs no sign-in, so it can run on a screen facing the stage. It shows only the stage information for its contest.
 
 ## Security summary
 
@@ -92,11 +97,11 @@ The **confidence monitor** (`…/contest_judging/#/monitor`) needs no sign-in, s
 - **Brute-force protection:** five wrong passwords lock that username and that address out for a minute, and the error message doesn't reveal whether a username exists.
 - **Only your Pages site can call the API.** Browsers on any other website are refused, and the app's own page restricts what scripts it can load (Content-Security-Policy).
 - **Audit trail.** Check-ins, score submissions and admin score edits (with reason, before and after) are logged in the app. On top of that, every saved version of `db.json` is kept in the data repo's git history.
-- **What's in `db.json`:** all contest data, accounts and password *hashes* (needed so a fresh deployment can restore logins), and the audit log. Sign-in sessions are never written to it. Keep the data repo private and limit who has access to it. The **Download backup** button in Setup leaves the password hashes out.
+- **What's in `db.json`:** all contest data, accounts and password *hashes* (needed so a fresh deployment can restore logins), and the audit log. Sign-in sessions are never written to it. Keep the data repo private and limit who has access to it. The **Download full backup** button on the Admin page leaves the password hashes out.
 
 ## Using the GitHub copy
 
-- **Setup → GitHub data copy** shows when the data was last copied and whether changes are waiting. **Copy to GitHub now** forces an immediate copy, which is a good idea before announcing winners.
+- **Admin → GitHub data copy** shows when the data was last copied and whether changes are waiting. **Copy to GitHub now** forces an immediate copy, which is a good idea before announcing winners.
 - To **fix something by hand**, edit `db.json` in the data repo, then click **Restore from GitHub…** and type `RESTORE`. This replaces the live data with the file and keeps everyone signed in. Use the same button to roll back after checking out an older version of the file in GitHub.
 
 ## How offline works

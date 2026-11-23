@@ -115,7 +115,10 @@ function wsAccept(req, socket) {
   const gone = () => sockets.delete(ws);
   socket.on('close', gone); socket.on('error', gone);
   ws.send(JSON.stringify({ type: 'rev', rev: dobj.contest.rev }));
-  if (dobj.contest.db) ws.send(JSON.stringify({ type: 'stage', ...dobj.contest.stagePublic() }));
+  if (dobj.contest.db) for (const cid of Object.keys(dobj.contest.db.data.contests)) {
+    const st = dobj.contest.stagePublic(cid);
+    if (st && st.type === 'cosplay') ws.send(JSON.stringify({ type: 'stage', ...st }));
+  }
 }
 
 // ---------- http

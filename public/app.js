@@ -83,6 +83,9 @@ const ICONS = {
   monitor: '<rect x="3" y="4" width="18" height="12"/><path d="M8 20h8M12 16v4"/>',
   more: '<path d="M5 12h.01M12 12h.01M19 12h.01" stroke-width="3.2"/>',
   user: '<circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/>',
+  admin: '<path d="M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6z"/><path d="M9 12l2 2 4-4"/>',
+  caret: '<path d="M7 10l5 5 5-5"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
 };
 function icon(name) {
   const s = document.createElement('span');
@@ -124,30 +127,61 @@ async function pbkdf2(password, saltHex, iterations = 150000) {
 const randHex = n => Array.from(crypto.getRandomValues(new Uint8Array(n)), b => b.toString(16).padStart(2, '0')).join('');
 
 // ============================================================ app state
-const EMPTY = () => ({ settings: {}, criteria: {}, participants: {}, scores: {}, stage: {}, users: {}, audit: {} });
+const EMPTY = () => ({ settings: {}, contests: {}, criteria: {}, participants: {}, scores: {}, stage: {}, users: {}, audit: {} });
 const S = {
   account: null,      // { username, user, token }
   rev: 0,
+  schema: 0,
   data: EMPTY(),
   outbox: [],         // [{ key, coll, id, patch, baseRev, ts }]
   net: 'offline',     // online | offline | syncing | auth
   lastSync: 0,
   clockOffset: Number(localStorage.getItem('cj-offset')) || 0,
 };
-const ui = { ci: { q: '', filter: 'all', division: 'all' }, judgeSel: null, reviewSel: null, includeDrafts: false, auditQ: '', newUser: { role: 'judge' }, eventDraft: {}, importText: '' };
+const ui = { ci: { q: '', filter: 'all', division: 'all' }, judgeSel: null, reviewSel: null, includeDrafts: false, auditQ: '', newUser: { kind: 'member', crole: 'judge' }, newContest: null, eventNameDraft: undefined, eventDraft: {}, importText: '' };
 
 function serverBase() {
   return (localStorage.getItem('cj-server') ?? CFG.serverUrl ?? '').replace(/\/+$/, '');
 }
 const serverNow = () => Date.now() + S.clockOffset;
-const settings = () => S.data.settings.event || { name: 'Cosplay Contest', stageSeconds: 90, warnSeconds: 15, divisions: [], scoresLocked: false };
-const criteria = () => Object.values(S.data.criteria).filter(c => !c.deleted).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
-const participants = () => Object.values(S.data.participants).filter(p => !p.deleted && !p.hidden);
-const stage = () => S.data.stage.current || { id: 'current', state: 'idle', participantId: null, nextParticipantId: null, durationMs: settings().stageSeconds * 1000, remainingMs: settings().stageSeconds * 1000, startedAt: null };
-const judges = () => Object.values(S.data.users).filter(u => u.role === 'judge');
+// ---------- contests: everything below works on the CURRENT contest
+const isAdmin = () => S.account?.user.role === 'admin';
+const roleIn = cid => isAdmin() ? 'admin' : (S.account?.user.contests || {})[cid] || null;
+const myContests = () => Object.values(S.data.contests)
+  .filter(c => !c.deleted && (isAdmin() || ((S.account?.user.contests || {})[c.id] && !c.archived)))
+  .sort((a, b) => (!!a.archived - !!b.archived) || (a.order ?? 0) - (b.order ?? 0) || String(a.name).localeCompare(b.name));
+function curId() {
+  const list = myContests().filter(c => !c.archived);
+  const saved = S.account && localStorage.getItem('cj-contest-' + S.account.username);
+  if (ui.contestId && list.some(c => c.id === ui.contestId)) return ui.contestId;
+  if (saved && list.some(c => c.id === saved)) return (ui.contestId = saved);
+  return (ui.contestId = list[0]?.id || null);
+}
+function setContest(id) {
+  ui.contestId = id;
+  if (S.account) localStorage.setItem('cj-contest-' + S.account.username, id);
+  ui.judgeSel = null; ui.ci = { q: '', filter: 'all', division: 'all' }; ui.eventDraft = {}; ui.importText = '';
+  location.hash = '#/' + home();
+  render();
+}
+const role = () => roleIn(curId());                      // my role in the current contest
+const manages = () => ['admin', 'lead'].includes(role());
+const settings = () => S.data.contests[curId()] || { id: null, name: 'No contest', type: 'cosplay', stageSeconds: 90, warnSeconds: 15, divisions: [], scoresLocked: false };
+const isMakers = () => settings().type === 'makers';
+const eventName = () => S.data.settings.event?.name || '';
+const inCur = r => r.contestId === curId();
+const criteria = () => Object.values(S.data.criteria).filter(c => !c.deleted && inCur(c)).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+const participants = () => Object.values(S.data.participants).filter(p => !p.deleted && !p.hidden && inCur(p));
+const stage = () => S.data.stage[curId()] || { id: curId(), contestId: curId(), state: 'idle', participantId: null, nextParticipantId: null, durationMs: settings().stageSeconds * 1000, remainingMs: settings().stageSeconds * 1000, startedAt: null };
+const judges = () => Object.values(S.data.users).filter(u => (u.contests || {})[curId()] === 'judge');
 const userName = id => S.data.users[id]?.displayName || (S.account?.user.id === id ? S.account.user.displayName : 'Unknown user');
-const role = () => S.account?.user.role;
-const partLabel = p => p ? `#${p.number || '?'} ${p.name || '(no name)'}` : 'Unknown contestant';
+const WORDS = () => isMakers()
+  ? { one: 'entry', many: 'entries', One: 'Entry', Many: 'Entries', division: 'Category', divisions: 'Categories' }
+  : { one: 'contestant', many: 'contestants', One: 'Contestant', Many: 'Contestants', division: 'Division', divisions: 'Divisions' };
+const partLabel = p => !p ? 'Unknown entry' : p.title ? `#${p.number || '?'} ${p.title}` : `#${p.number || '?'} ${p.name || '(no name)'}`;
+const partSub = p => !p ? '' : p.title
+  ? [p.name ? 'by ' + p.name : '', p.division, p.materials].filter(Boolean).join(' · ')
+  : [p.character, p.series, p.division].filter(Boolean).join(' · ');
 function runOrder() {
   const key = p => p.order ?? (parseFloat(p.number) || 1e9);
   return participants().filter(p => p.checkedIn || p.status === 'on_stage' || p.status === 'done').sort((a, b) => key(a) - key(b) || byNum(a, b));
@@ -156,7 +190,7 @@ function runOrder() {
 // ---------- persistence
 const persist = debounce(() => {
   if (!S.account) return;
-  kv('cj-u-' + S.account.username, 'state', { rev: S.rev, data: S.data, outbox: S.outbox }).catch(e => console.error(e));
+  kv('cj-u-' + S.account.username, 'state', { rev: S.rev, schema: S.schema, data: S.data, outbox: S.outbox }).catch(e => console.error(e));
 }, 200);
 
 // ---------- local mutation + outbox
@@ -213,6 +247,7 @@ async function sync({ full = false } = {}) {
   const batch = S.outbox.slice(0, 500);
   batch.forEach(o => { o.sending = true; });
   try {
+    const hadData = S.rev > 0;
     const t0 = Date.now();
     const res = await api('/api/sync', {
       since: full ? 0 : S.rev,
@@ -238,7 +273,10 @@ async function sync({ full = false } = {}) {
     }
     for (const { coll, rec } of res.changes) applyServerRecord(coll, rec);
     S.rev = res.rev;
-    const prevRole = S.account.user.role;
+    const access = u => JSON.stringify([u.role, Object.entries(u.contests || {}).sort()]);
+    const accessChanged = access(S.account.user) !== access(res.user);
+    const schemaChanged = !full && hadData && S.schema !== res.schema; // e.g. data cached before multi-contest support
+    S.schema = res.schema;
     S.account.user = res.user;
     saveAccount(S.account);
     S.lastSync = Date.now();
@@ -246,9 +284,10 @@ async function sync({ full = false } = {}) {
     if (S.account.user.mustChangePassword) forcePasswordChange();
     persist();
     if (res.changes.length || res.results.some(r => !r.ok) || full || res.reset) scheduleRender();
-    if (prevRole !== res.user.role || (needFull && !full)) {
-      if (prevRole !== res.user.role) toast('Your role changed to ' + res.user.role);
-      syncing = false; return sync({ full: true }); // re-pull so nothing rejected lingers locally
+    if (accessChanged || schemaChanged || (needFull && !full)) {
+      if (accessChanged) toast('Your contest access was updated');
+      // Re-pull everything: drops data you can no longer see, and anything rejected.
+      syncing = false; await sync({ full: true }); scheduleRender(); return;
     }
   } catch (e) {
     batch.forEach(o => { delete o.sending; });
@@ -265,7 +304,7 @@ function setNet(n) {
   const wasOnline = S.net === 'online';
   S.net = n;
   renderSync();
-  if (wasOnline !== (n === 'online') && ['setup', 'judge'].includes(route().name)) scheduleRender(); // online-only buttons, offline banner
+  if (wasOnline !== (n === 'online') && ['setup', 'judge', 'admin', ''].includes(route().name)) scheduleRender(); // online-only buttons, offline banner, first-load message
 }
 
 // Live connection to the API (WebSocket): instant nudges when anything changes, and the stage timer.
@@ -312,12 +351,13 @@ async function startSession(acc) {
   S.account = acc;
   const saved = await kv('cj-u-' + acc.username.toLowerCase(), 'state').catch(() => null);
   S.rev = saved?.rev || 0;
+  S.schema = saved?.schema || 0;
   S.data = Object.assign(EMPTY(), saved?.data || {});
   S.outbox = (saved?.outbox || []).map(o => { delete o.sending; return o; });
   S.account.username = acc.username.toLowerCase();
   await kv(DEVICE_DB, 'active', S.account.username);
   S.net = 'offline';
-  if (!location.hash || location.hash === '#/' || location.hash === '#/login') location.hash = '#/' + HOME[role()];
+  if (location.hash === '#/login') location.hash = '#/';
   render();
   sync();
 }
@@ -388,17 +428,23 @@ function openModal(title, body, actions = []) {
 }
 
 // ============================================================ routing & shell
+// roles = your role in the CURRENT contest. global = needs the account-wide admin role.
 const ROUTES = {
-  results: { title: 'Results', short: 'Results', icon: 'results', roles: ['admin'], view: viewResults },
-  checkin: { title: 'Check-in', short: 'Check-in', icon: 'checkin', roles: ['admin', 'coordinator'], view: viewCheckin },
-  stage: { title: 'Stage', short: 'Stage', icon: 'stage', roles: ['admin', 'coordinator'], view: viewStage },
-  review: { title: 'Score review', short: 'Review', icon: 'review', roles: ['admin'], view: viewReview },
+  results: { title: 'Results', short: 'Results', icon: 'results', roles: ['admin', 'lead', 'viewer'], view: viewResults },
+  checkin: { title: 'Check-in', short: 'Check-in', icon: 'checkin', roles: ['admin', 'lead', 'coordinator', 'viewer'], view: viewCheckin },
+  stage: { title: 'Stage', short: 'Stage', icon: 'stage', roles: ['admin', 'lead', 'coordinator'], cosplay: true, view: viewStage },
+  review: { title: 'Score review', short: 'Review', icon: 'review', roles: ['admin', 'lead'], view: viewReview },
   judge: { title: 'Scoring', short: 'Scoring', icon: 'judge', roles: ['judge'], view: viewJudge },
-  setup: { title: 'Setup', short: 'Setup', icon: 'setup', roles: ['admin'], view: viewSetup },
-  audit: { title: 'Audit log', short: 'Audit', icon: 'audit', roles: ['admin'], view: viewAudit },
+  setup: { title: 'Contest setup', short: 'Setup', icon: 'setup', roles: ['admin', 'lead'], view: viewSetup },
+  audit: { title: 'Audit log', short: 'Audit', icon: 'audit', roles: ['admin', 'lead'], view: viewAudit },
+  admin: { title: 'Admin', short: 'Admin', icon: 'admin', global: true, view: viewAdmin },
 };
 const TABS_MAX = 4; // bottom bar on phones: first 4 screens, the rest under "More"
-const HOME = { admin: 'results', coordinator: 'checkin', judge: 'judge' };
+function routeAllowed(v) { return v.global ? isAdmin() : (!!curId() && v.roles.includes(role()) && !(v.cosplay && isMakers())); }
+function home() {
+  if (!curId()) return isAdmin() ? 'admin' : 'none';
+  return { admin: 'results', lead: 'results', viewer: 'results', coordinator: 'checkin', judge: 'judge' }[role()] || 'none';
+}
 const route = () => { const [name, ...args] = location.hash.replace(/^#\/?/, '').split('/'); return { name: name || '', args }; };
 
 window.addEventListener('hashchange', () => render());
@@ -427,19 +473,28 @@ let monitorActive = false;
 function render() {
   const app = $('#app');
   const r = route();
-  if (r.name === 'monitor') { if (!monitorActive) renderMonitor(app); return; }
+  if (r.name === 'monitor') { if (!monitorActive || (r.args[0] || null) !== mon.cid) renderMonitor(app); return; }
   monitorActive = false;
   if (!S.account) { renderLogin(app); return; }
-  const allowed = Object.entries(ROUTES).filter(([, v]) => v.roles.includes(role()));
-  const cur = ROUTES[r.name];
-  if (!cur || !cur.roles.includes(role())) { location.hash = '#/' + HOME[role()]; return; }
+  if (!r.name && !curId() && S.rev === 0) {
+    // First sign-in on this device: wait for the first sync before choosing a start page.
+    app.dataset.shell = '';
+    app.replaceChildren(h('div.login', h('div.logo', h('img', { src: 'icons/icon.svg', alt: '' }), h('h1', APP_NAME), h('span.kicker', S.net === 'offline' ? 'Waiting for a connection…' : 'Loading your contests…'))));
+    return;
+  }
+  if (!r.name || (r.name === 'none' && curId())) { location.hash = '#/' + home(); return; }
+  const allowed = Object.entries(ROUTES).filter(([, v]) => routeAllowed(v));
+  const cur = r.name === 'none' ? { title: 'Welcome', view: viewNoContest } : ROUTES[r.name];
+  if (!cur || (r.name !== 'none' && !routeAllowed(cur))) { location.hash = '#/' + home(); return; }
 
   let view = $('#view');
-  if (!view || app.dataset.shell !== role()) {
-    app.dataset.shell = role();
+  const shellKey = `${isAdmin()}|${role()}|${curId()}`;
+  if (!view || app.dataset.shell !== shellKey) {
+    app.dataset.shell = shellKey;
     app.replaceChildren(
       h('header.topbar',
-        h('div.brand', h('img', { src: 'icons/icon.svg', alt: '' }), h('div.grow', h('span.kicker', APP_NAME), h('span#ev-name', settings().name))),
+        h('button.brand#brand', { onclick: () => contestSheet(), title: 'Switch contest' }, h('img', { src: 'icons/icon.svg', alt: '' }),
+          h('div.grow', h('span.kicker#brand-kicker', APP_NAME), h('span#ev-name', settings().name)), h('span.switch-caret#caret')),
         h('nav.nav#nav'),
         h('div.topbar-right',
           h('button.sync#sync', { onclick: syncMenu, title: 'Sync status' }),
@@ -448,13 +503,18 @@ function render() {
       h('nav.tabbar#tabbar'));
     view = $('#view');
   }
-  $('#ev-name').textContent = settings().name;
+  $('#ev-name').textContent = curId() ? settings().name : (isAdmin() ? 'No contests yet' : APP_NAME);
+  $('#brand-kicker').textContent = eventName() ? `${APP_NAME} · ${eventName()}` : APP_NAME;
+  const switchable = isAdmin() || myContests().length > 1;
+  $('#caret').classList.toggle('hidden', !switchable);
+  $('#brand').disabled = !switchable;
   $('#who').textContent = S.account.user.displayName;
-  const monitorLink = role() !== 'judge';
+  const monitorLink = !!curId() && !isMakers() && !['judge', 'viewer'].includes(role());
+  const monHref = '#/monitor/' + curId();
   $('#nav').replaceChildren(...allowed.map(([k, v]) => h('a', { href: '#/' + k, class: k === r.name ? 'active' : '' }, v.title)),
-    ...(monitorLink ? [h('a', { href: '#/monitor', target: '_blank', title: 'Open the confidence monitor in a new window' }, icon('monitor'), 'Monitor')] : []));
+    ...(monitorLink ? [h('a', { href: monHref, target: '_blank', title: 'Open the confidence monitor in a new window' }, icon('monitor'), 'Monitor')] : []));
   // Phones / portrait tablets: bottom tabs. One-screen roles (judges) get none.
-  const entries = [...allowed.map(([k, v]) => ({ k, ...v })), ...(monitorLink ? [{ k: 'monitor', short: 'Monitor', icon: 'monitor', ext: true }] : [])];
+  const entries = [...allowed.map(([k, v]) => ({ k, ...v })), ...(monitorLink ? [{ k: 'monitor/' + curId(), short: 'Monitor', title: 'Monitor', icon: 'monitor', ext: true }] : [])];
   const tabs = entries.length > TABS_MAX + 1 ? entries.slice(0, TABS_MAX) : entries;
   const extra = entries.slice(tabs.length);
   document.body.classList.toggle('has-tabs', entries.length > 1);
@@ -462,7 +522,7 @@ function render() {
     ...tabs.map(e => h('a', { href: '#/' + e.k, class: e.k === r.name ? 'active' : '', target: e.ext ? '_blank' : null }, icon(e.icon), e.short)),
     ...(extra.length ? [h('button', { class: extra.some(e => e.k === r.name) ? 'active' : '', onclick: () => moreSheet(extra, r.name) }, icon('more'), 'More')] : []));
   renderSync();
-  document.title = cur.title + ' · ' + APP_NAME;
+  document.title = cur.title + ' · ' + (curId() ? settings().name : APP_NAME);
   stopTicker();
   view.replaceChildren(cur.view(...r.args));
 }
@@ -474,6 +534,24 @@ function renderSync() {
   const labels = { online: n ? `Syncing ${n}` : 'Online', syncing: 'Connecting', offline: n ? `Offline · ${n} unsynced` : 'Offline', auth: 'Sign in to sync' };
   el.className = 'sync ' + S.net;
   el.replaceChildren(...[h('span.dot'), h('span.lbl', labels[S.net]), n ? h('span.count', String(n)) : null].filter(Boolean));
+}
+function contestSheet() {
+  const list = myContests();
+  if (!isAdmin() && list.length < 2) return;
+  const typeWord = c => c.type === 'makers' ? 'Makers' : 'Cosplay';
+  const close = openModal('Switch contest', h('div.stack',
+    h('div.sheet-list', list.length ? list.map(c => h('a', {
+      href: '#', class: c.id === curId() ? 'active' : '',
+      onclick: e => { e.preventDefault(); close(); if (c.archived) { toast('That contest is archived. Restore it on the Admin page to open it.', 'warn'); return; } setContest(c.id); },
+    }, icon(c.type === 'makers' ? 'setup' : 'stage'), h('span.grow', c.name, c.archived ? h('span.badge', { style: { marginLeft: '8px' } }, 'archived') : null),
+      h('span.badge', typeWord(c)), h('span.badge.checked_in', roleIn(c.id)))) : [h('p.muted', 'No contests yet.')]),
+    isAdmin() ? h('a.btn.ghost', { href: '#/admin', onclick: () => close() }, icon('plus'), 'New contest / manage') : null));
+}
+function viewNoContest() {
+  return h('div.panel.accent', { style: { maxWidth: '560px', margin: '8vh auto' } },
+    h('span.kicker', 'Welcome to ' + APP_NAME),
+    h('h2', `Hi ${S.account.user.displayName}`),
+    h('p.muted', 'You haven\'t been added to a contest yet. Ask an admin to give you access; it will appear here automatically.'));
 }
 function moreSheet(items, current) {
   const close = openModal('More', h('div.sheet-list', items.map(e => h('a', {
@@ -567,7 +645,7 @@ async function renderLogin(app) {
     recent.length ? h('div', h('div.small.muted', { style: { marginBottom: '.4rem' } }, 'Used on this device'),
       h('div.recent', recent.map(a => h('button.chip', { type: 'button', onclick: () => { user.value = a.username; pw.focus(); } }, a.user?.displayName || a.username)))) : null,
     user, pw, err, btn, serverInfo),
-    h('p.small.muted', { style: { textAlign: 'center', marginTop: '1.5rem' } }, h('a', { href: '#/monitor' }, 'Open confidence monitor (no sign-in needed)'))));
+    h('p.small.muted', { style: { textAlign: 'center', marginTop: '1.5rem' } }, h('a', { href: '#/monitor' }, 'Open a confidence monitor (no sign-in needed)'))));
   setTimeout(() => { const a = document.activeElement; if (!a || a === document.body) user.focus(); }, 50); // never steal focus from a field already in use
 }
 
@@ -575,9 +653,12 @@ async function renderLogin(app) {
 function viewCheckin() {
   const all = participants().sort(byNum);
   const st = settings();
+  const W = WORDS();
+  const readOnly = role() === 'viewer';
   const counts = { all: all.length, waiting: all.filter(p => !p.checkedIn && p.status !== 'no_show').length, in: all.filter(p => p.checkedIn).length, no_show: all.filter(p => p.status === 'no_show').length };
   const dupes = {};
   all.forEach(p => { if (p.number) dupes[p.number] = (dupes[p.number] || 0) + 1; });
+  const statusWord = s => (s || 'registered').replace('_', ' ');
   const listEl = h('div.list');
   const draw = () => {
     const q = ui.ci.q.trim().toLowerCase();
@@ -586,80 +667,87 @@ function viewCheckin() {
       if (ui.ci.filter === 'in' && !p.checkedIn) return false;
       if (ui.ci.filter === 'no_show' && p.status !== 'no_show') return false;
       if (ui.ci.division !== 'all' && p.division !== ui.ci.division) return false;
-      return !q || [p.number, p.name, p.character, p.series].some(x => String(x || '').toLowerCase().includes(q));
+      return !q || [p.number, p.name, p.title, p.character, p.series, p.materials].some(x => String(x || '').toLowerCase().includes(q));
     });
-    listEl.replaceChildren(...(rows.length ? rows.map(p => h('div.item', { onclick: () => editParticipant(p) },
+    listEl.replaceChildren(...(rows.length ? rows.map(p => h('div.item', { onclick: readOnly ? null : () => editParticipant(p), style: readOnly ? { cursor: 'default' } : null },
       h('div.num', p.number || '–'),
-      h('div.who', h('div.n', p.name || '(no name)', dupes[p.number] > 1 ? h('span.badge.no_show', { style: { marginLeft: '.5rem' } }, 'duplicate #') : null),
-        h('div.c', h('span.badge.mobile', { class: p.status || 'registered' }, (p.status || 'registered').replace('_', ' ')), [p.character, p.series].filter(Boolean).join(' · ') || '—', p.division ? ' · ' + p.division : '')),
-      h('span.badge', { class: p.status || 'registered' }, (p.status || 'registered').replace('_', ' ')),
-      p.checkedIn
+      h('div.who', h('div.n', p.title || p.name || '(no name)', dupes[p.number] > 1 ? h('span.badge.no_show', { style: { marginLeft: '.5rem' } }, 'duplicate #') : null),
+        h('div.c', h('span.badge.mobile', { class: p.status || 'registered' }, statusWord(p.status)), partSub(p) || '—')),
+      h('span.badge', { class: p.status || 'registered' }, statusWord(p.status)),
+      readOnly ? null : p.checkedIn
         ? h('button.btn.sm.ghost', { onclick: e => { e.stopPropagation(); mutate('participants', p.id, { checkedIn: false, status: 'registered' }); } }, 'Undo')
         : h('button.btn.ok', { onclick: e => { e.stopPropagation(); mutate('participants', p.id, { checkedIn: true, status: 'checked_in' }); toast(`${partLabel(p)} checked in`, 'ok'); } }, 'Check in')))
-      : [h('p.muted', all.length ? 'No one matches.' : 'No contestants yet. Add walk-ins here, or an admin can import a list in Setup.')]));
+      : [h('p.muted', all.length ? 'Nothing matches.' : readOnly ? `No ${W.many} yet.` : `No ${W.many} yet. Add walk-ins here, or import a list in Contest setup.`)]));
   };
   draw();
-  const search = h('input', { type: 'search', placeholder: 'Search number, name, character…', value: ui.ci.q, oninput: e => { ui.ci.q = e.target.value; draw(); } });
+  const search = h('input', { type: 'search', placeholder: isMakers() ? 'Search number, entry, maker…' : 'Search number, name, character…', value: ui.ci.q, oninput: e => { ui.ci.q = e.target.value; draw(); } });
   const chip = (k, label) => h('button.chip', { class: ui.ci.filter === k ? 'on' : '', onclick: () => { ui.ci.filter = k; render(); } }, `${label} (${counts[k]})`);
   return h('div',
     h('div.tiles', { style: { marginBottom: '1rem' } },
       h('div.tile', h('div.v', counts.in), h('div.l', 'Checked in')),
       h('div.tile', h('div.v', counts.waiting), h('div.l', 'Still expected')),
       h('div.tile', h('div.v', counts.no_show), h('div.l', 'No-shows'))),
+    readOnly ? h('div.banner.info', h('span.tag', 'View only'), `You can see this contest's ${W.many} and results, but not change anything.`) : null,
     h('div.panel.stack',
-      h('div.row', h('div.grow', search), h('button.btn.primary', { onclick: () => editParticipant(null) }, '+ Walk-in')),
+      h('div.row', h('div.grow', search), readOnly ? null : h('button.btn.primary', { onclick: () => editParticipant(null) }, isMakers() ? '+ Entry' : '+ Walk-in')),
       h('div.row.between',
         h('div.chips', chip('all', 'All'), chip('waiting', 'Not here yet'), chip('in', 'Checked in'), chip('no_show', 'No-show')),
         st.divisions?.length ? h('select', { style: { width: 'auto' }, onchange: e => { ui.ci.division = e.target.value; draw(); } },
-          h('option', { value: 'all' }, 'All divisions'), st.divisions.map(d => h('option', { value: d, selected: ui.ci.division === d }, d))) : null),
+          h('option', { value: 'all' }, 'All ' + W.divisions.toLowerCase()), st.divisions.map(d => h('option', { value: d, selected: ui.ci.division === d }, d))) : null),
       listEl));
 }
 
 function nextNumber() {
   return String(participants().reduce((m, p) => Math.max(m, parseInt(p.number) || 0), 0) + 1);
 }
+// Fields per contest type: [key, label, placeholder]
+const PART_FIELDS = {
+  cosplay: [['number', 'Contestant #'], ['name', 'Name (as announced)', 'Badge / cosplay name'], ['character', 'Character'], ['series', 'Series / source']],
+  makers: [['number', 'Entry #'], ['title', 'Entry title', 'e.g. Mjolnir replica'], ['name', 'Maker', 'Name as credited'], ['materials', 'Materials & techniques', 'EVA foam, resin, 3D printing…']],
+};
 function editParticipant(p) {
   const isNew = !p;
   const st = settings();
+  const W = WORDS();
+  const type = isMakers() ? 'makers' : 'cosplay';
   p = p || { number: nextNumber(), division: st.divisions?.[0] || '' };
   const f = {};
   const field = (k, label, el) => h('label.field', h('span', label), f[k] = el);
   const inp = (k, ph = '') => h('input', { type: 'text', value: p[k] || '', placeholder: ph });
   const ta = k => h('textarea', { rows: 3 }, p[k] || '');
   const checkIn = h('input', { type: 'checkbox', checked: isNew ? true : !!p.checkedIn });
-  const status = h('select', ['registered', 'checked_in', 'on_stage', 'done', 'no_show'].map(s => h('option', { value: s, selected: (p.status || 'registered') === s }, s.replace('_', ' '))));
-  const close = openModal(isNew ? 'Add contestant' : `Edit ${partLabel(p)}`, h('div.stack',
+  const statuses = isMakers() ? ['registered', 'checked_in', 'done', 'no_show'] : ['registered', 'checked_in', 'on_stage', 'done', 'no_show'];
+  const status = h('select', statuses.map(s2 => h('option', { value: s2, selected: (p.status || 'registered') === s2 }, s2.replace('_', ' '))));
+  const keys = [...PART_FIELDS[type].map(x => x[0]), 'division', 'judgeNotes', 'notes', 'contact'];
+  const close = openModal(isNew ? `Add ${W.one}` : `Edit ${partLabel(p)}`, h('div.stack',
     h('div.form-grid',
-      field('number', 'Contestant #', inp('number')),
-      field('name', 'Name (as announced)', inp('name', 'Badge / cosplay name')),
-      field('character', 'Character', inp('character')),
-      field('series', 'Series / source', inp('series')),
-      field('division', 'Division', h('select', h('option', { value: '' }, '—'), (st.divisions || []).map(d => h('option', { value: d, selected: p.division === d }, d)))),
+      PART_FIELDS[type].map(([k, label, ph]) => field(k, label, inp(k, ph))),
+      field('division', W.division, h('select', h('option', { value: '' }, '—'), (st.divisions || []).map(d => h('option', { value: d, selected: p.division === d }, d)))),
       isNew ? null : field('status', 'Status', status)),
-    field('judgeNotes', 'Notes shown to judges (build notes, references)', ta('judgeNotes')),
-    field('notes', 'Private staff notes (accessibility, music cue…) — not shown to judges', ta('notes')),
+    field('judgeNotes', isMakers() ? 'Notes shown to judges (build log, techniques, references)' : 'Notes shown to judges (build notes, references)', ta('judgeNotes')),
+    field('notes', isMakers() ? 'Private staff notes (table number, fragile, pickup time…) — not shown to judges' : 'Private staff notes (accessibility, music cue…) — not shown to judges', ta('notes')),
     field('contact', 'Contact (private)', inp('contact', 'Phone or email')),
     isNew ? h('label.check', checkIn, 'Checked in now') : null),
   [
-    !isNew && role() === 'admin' ? h('button.btn.danger', { onclick: () => { if (confirm(`Delete ${partLabel(p)}? Their scores will be hidden from results.`)) { mutate('participants', p.id, { deleted: true }); close(); } } }, 'Delete') : null,
+    !isNew && manages() ? h('button.btn.danger', { onclick: () => { if (confirm(`Delete ${partLabel(p)}? Their scores will be hidden from results.`)) { mutate('participants', p.id, { deleted: true }); close(); } } }, 'Delete') : null,
     !isNew && p.status !== 'no_show' ? h('button.btn', { onclick: () => { mutate('participants', p.id, { status: 'no_show', checkedIn: false }); close(); } }, 'Mark no-show') : null,
     h('button.btn.ghost', { onclick: () => close() }, 'Cancel'),
     h('button.btn.primary', {
       onclick: () => {
         const patch = {};
-        for (const k of ['number', 'name', 'character', 'series', 'division', 'judgeNotes', 'notes', 'contact']) {
+        for (const k of keys) {
           const v = f[k].value.trim();
           if (isNew || v !== (p[k] || '')) patch[k] = v;
         }
-        if (!patch.name && isNew) { toast('Please enter a name', 'bad'); return; }
-        if (isNew) { patch.checkedIn = checkIn.checked; patch.status = checkIn.checked ? 'checked_in' : 'registered'; }
+        if (isNew && !(isMakers() ? patch.title || patch.name : patch.name)) { toast(isMakers() ? 'Please enter an entry title or maker' : 'Please enter a name', 'bad'); return; }
+        if (isNew) { patch.contestId = curId(); patch.checkedIn = checkIn.checked; patch.status = checkIn.checked ? 'checked_in' : 'registered'; }
         else if (f.status.value !== (p.status || 'registered')) {
           patch.status = f.status.value;
           patch.checkedIn = ['checked_in', 'on_stage', 'done'].includes(f.status.value);
         }
         if (Object.keys(patch).length) mutate('participants', isNew ? newId() : p.id, patch);
         close();
-        if (isNew) toast(`Added #${patch.number} ${patch.name}`, 'ok');
+        if (isNew) toast(`Added ${partLabel(patch)}`, 'ok');
       },
     }, isNew ? 'Add' : 'Save'),
   ]);
@@ -672,7 +760,7 @@ function remainingOf(s, now = serverNow()) {
   if (s.state === 'idle' || s.state === 'ready') return s.remainingMs ?? s.durationMs;
   return s.remainingMs ?? 0;
 }
-function stageSet(patch) { mutate('stage', 'current', { ...patch, seq: serverNow() }); }
+function stageSet(patch) { mutate('stage', curId(), { ...patch, contestId: curId(), seq: serverNow() }); }
 function nextAfter(pid) {
   const order = runOrder().filter(p => p.status === 'checked_in' && p.id !== pid);
   const all = runOrder();
@@ -757,7 +845,7 @@ function viewStage() {
       h('div.panel.stack',
         h('div.row.between', h('div', h('span.kicker', 'On stage'), h('h2', { style: { margin: 0 } }, cur ? partLabel(cur) : '—'),
           cur ? h('div.muted', [cur.character, cur.series, cur.division].filter(Boolean).join(' · ')) : null),
-        h('a.btn', { href: '#/monitor', target: '_blank' }, 'Open monitor ↗')),
+        h('a.btn', { href: '#/monitor/' + curId(), target: '_blank' }, 'Open monitor ↗')),
         cur?.notes ? h('div.banner.warn', h('span.tag', 'Staff note'), h('span.grow', cur.notes)) : null,
         clock, prog, stateLbl,
         h('div.controls',
@@ -767,7 +855,7 @@ function viewStage() {
           B('Next contestant →', stageAct.next, 'primary')),
         h('div.row.between', h('div.muted', 'Up next: ', h('b', nxt ? partLabel(nxt) : '—'), nxt?.character ? ` (${nxt.character})` : ''),
           cur ? h('button.btn.sm.ghost', { onclick: stageAct.clear }, 'Clear stage') : null)),
-      h('div.panel.small.muted', `Stage time per contestant: ${settings().stageSeconds}s · warning at ${settings().warnSeconds}s. `,
+      h('div.panel.small.muted', `Stage time per contestant: ${settings().stageSeconds}s · warning at ${settings().warnSeconds}s (change in Contest setup). `,
         'The monitor works on this device even offline; on other devices it needs the server.')));
 }
 function reorder(order, i, dir) {
@@ -777,32 +865,48 @@ function reorder(order, i, dir) {
 }
 
 // ============================================================ confidence monitor (no sign-in)
-const mon = { data: null, seq: -1, offset: 0, connected: false, el: null, raf: null };
+// One monitor per cosplay contest: #/monitor/<contestId>. Fed by the server's live connection and,
+// on the stage-control device itself, by a local channel that works with no network at all.
+const mon = { byId: {}, cid: null, connected: false, el: null, raf: null };
 const bc = 'BroadcastChannel' in window ? new BroadcastChannel('cj-stage') : null;
 if (bc) bc.onmessage = e => monitorFeed(e.data, 'local');
 
 function stagePublicLocal() {
-  const s = stage(); const ev = settings();
+  const s = stage(); const c = settings();
   const pick = id => { const p = S.data.participants[id]; return p && !p.deleted ? { number: p.number, name: p.name, character: p.character, series: p.series, division: p.division } : null; };
-  return { eventName: ev.name, warnSeconds: ev.warnSeconds, state: s.state, durationMs: s.durationMs, startedAt: s.startedAt, remainingMs: s.remainingMs, seq: s.seq || 0, current: pick(s.participantId), next: pick(s.nextParticipantId), serverTime: serverNow() };
+  return { contestId: curId(), contestName: c.name, eventName: eventName(), type: c.type, warnSeconds: c.warnSeconds, state: s.state, durationMs: s.durationMs, startedAt: s.startedAt, remainingMs: s.remainingMs, seq: s.seq || 0, current: pick(s.participantId), next: pick(s.nextParticipantId), serverTime: serverNow() };
 }
-function broadcastStageLocal() { if (bc) bc.postMessage(stagePublicLocal()); }
+function broadcastStageLocal() { if (bc && curId()) bc.postMessage(stagePublicLocal()); }
 
 function monitorFeed(d, src) {
-  if (!d || (d.seq || 0) < mon.seq) return;
-  mon.seq = d.seq || 0;
-  mon.data = d;
-  mon.offset = d.serverTime - Date.now();
+  if (!d || !d.contestId) return;
+  const cur = mon.byId[d.contestId];
+  if (cur && (d.seq || 0) < cur.seq) return;
+  mon.byId[d.contestId] = { data: d, seq: d.seq || 0, offset: d.serverTime - Date.now() };
   if (src === 'server') mon.connected = true;
-  if (monitorActive) drawMonitorStatic();
+  if (monitorActive) { if (!mon.cid) renderMonitor($('#app')); else if (d.contestId === mon.cid) drawMonitorStatic(); }
 }
-function monitorConn(ok) { mon.connected = ok; if (monitorActive) drawMonitorStatic(); }
+function monitorConn(ok) { mon.connected = ok; if (monitorActive && mon.cid) drawMonitorStatic(); }
 
 function renderMonitor(app) {
   monitorActive = true;
   app.dataset.shell = '';
   stopTicker();
-  document.title = 'Confidence monitor';
+  cancelAnimationFrame(mon.raf);
+  mon.cid = route().args[0] || null;
+  const known = Object.values(mon.byId).map(x => x.data).filter(d => d.type !== 'makers');
+  if (!mon.cid && known.length === 1) mon.cid = known[0].contestId;
+  if (!mon.cid) {
+    // No contest in the address: let the operator pick one.
+    document.title = 'Confidence monitor';
+    if (!known.length) api('/api/stage').then(d => monitorFeed(d, 'server')).catch(() => {});
+    app.replaceChildren(h('div.login', h('div.logo', h('img', { src: 'icons/icon.svg', alt: '' }), h('h1', 'Monitor'), h('span.kicker', 'Choose a contest')),
+      h('div.panel.stack', known.length
+        ? h('div.sheet-list', known.map(d => h('a', { href: '#/monitor/' + d.contestId }, icon('monitor'), d.contestName || 'Contest')))
+        : h('p.muted', 'Waiting for the server…'))));
+    return;
+  }
+  document.title = 'Monitor · ' + (mon.byId[mon.cid]?.data.contestName || APP_NAME);
   const el = mon.el = h('div.monitor',
     h('div.top', h('span.ev'), h('span.conn')),
     h('div.who', h('div.num'), h('div.name'), h('div.char')),
@@ -810,19 +914,20 @@ function renderMonitor(app) {
     h('div.bar', h('div')),
     h('div.next'),
     h('div.tools',
-      h('button.btn.sm', { onclick: goFullscreen }, '⛶ Full screen'),
-      h('a.btn.sm', { href: S.account ? '#/' + HOME[role()] : '#/login' }, 'Exit')));
+      h('button.btn.sm', { onclick: goFullscreen }, 'Full screen'),
+      h('a.btn.sm', { href: S.account ? '#/' + home() : '#/login' }, 'Exit')));
   el.addEventListener('dblclick', goFullscreen);
   app.replaceChildren(el);
-  if (!mon.data) { if (S.account) monitorFeed(stagePublicLocal(), 'local'); api('/api/stage').then(d => monitorFeed(d, 'server')).catch(() => {}); }
+  if (S.account && mon.cid === curId()) monitorFeed(stagePublicLocal(), 'local');
+  api('/api/stage?contest=' + encodeURIComponent(mon.cid)).then(d => monitorFeed(d, 'server')).catch(() => {});
   drawMonitorStatic();
-  cancelAnimationFrame(mon.raf);
   let last = '';
   const loop = () => {
-    if (!monitorActive) return;
-    const d = mon.data;
+    if (!monitorActive || !mon.cid) return;
+    const m = mon.byId[mon.cid];
+    const d = m && m.data;
     if (d) {
-      const now = Date.now() + mon.offset;
+      const now = Date.now() + m.offset;
       const rem = remainingOf(d, now);
       const active = d.current && !['idle'].includes(d.state);
       const over = active && rem <= 0 && d.state !== 'ready';
@@ -840,8 +945,8 @@ function renderMonitor(app) {
 }
 function drawMonitorStatic() {
   const el = mon.el; if (!el) return;
-  const d = mon.data || {};
-  $('.top .ev', el).textContent = d.eventName || '';
+  const d = mon.byId[mon.cid]?.data || {};
+  $('.top .ev', el).textContent = [d.eventName, d.contestName].filter(Boolean).join(' · ');
   $('.top .conn', el).textContent = mon.connected ? '' : (bc ? '● local only' : '● no connection');
   const c = d.current;
   $('.who .num', el).textContent = c ? '#' + (c.number || '') : '';
@@ -883,21 +988,21 @@ function viewJudge() {
     locked ? h('div.banner.bad', h('span.tag', 'Locked'), 'Scoring is locked by the admin. Your scores are read-only.') : null,
     offline ? h('div.banner.warn', h('span.tag', 'Offline'), h('span.grow', S.net === 'auth'
       ? 'Sign in again to send your scores. They are saved on this tablet.'
-      : 'Follow the stage and use Next. Your scores are saved on this tablet and send automatically when you reconnect.')) : null,
-    !offline && onStage && onStage.id !== ui.judgeSel ? h('div.banner.stage', h('span.tag', 'On stage'), h('div.grow', h('b', partLabel(onStage)), onStage.character ? ` — ${onStage.character}` : ''),
+      : (isMakers() ? 'Use Next to move between entries.' : 'Follow the stage and use Next.') + ' Your scores are saved on this tablet and send automatically when you reconnect.')) : null,
+    !offline && !isMakers() && onStage && onStage.id !== ui.judgeSel ? h('div.banner.stage', h('span.tag', 'On stage'), h('div.grow', h('b', partLabel(onStage)), onStage.character ? ` — ${onStage.character}` : ''),
       h('button.btn.primary', { onclick: () => goJudge(onStage.id) }, 'Score now')) : null,
     h('div.grid.cols-2',
-      h('div.panel', h('div.row.between', h('h3', 'Contestants'), h('span.muted.small', `${scored}/${list.length} submitted`)),
+      h('div.panel', h('div.row.between', h('h3', WORDS().Many), h('span.muted.small', `${scored}/${list.length} submitted`)),
         h('div.list', list.length ? list.map(p => {
           const sc = S.data.scores[scoreId(p.id)];
           const live = sc && !sc.deleted;
           return h('div.item', { class: p.id === ui.judgeSel ? 'sel' : '', onclick: () => goJudge(p.id) },
             h('div.num', p.number || '–'),
-            h('div.who', h('div.n', p.name), h('div.c', [p.character, p.division].filter(Boolean).join(' · '))),
-            p.id === stg.participantId ? h('span.badge.on_stage', offline ? 'last on stage' : 'on stage') : null,
+            h('div.who', h('div.n', p.title || p.name), h('div.c', partSub(p))),
+            !isMakers() && p.id === stg.participantId ? h('span.badge.on_stage', offline ? 'last on stage' : 'on stage') : null,
             live && sc.submitted ? h('span.badge.submitted', 'Done ' + fmt1(scoreTotal(sc, crits).total)) : live && scoreTotal(sc, crits).filled ? h('span.badge.draft', 'draft') : null);
-        }) : h('p.muted', 'Contestants appear here once they are checked in.'))),
-      sel ? scoreForm(sel, crits, locked, list) : h('div.panel.muted', 'Pick a contestant to score.')));
+        }) : h('p.muted', `${WORDS().Many} appear here once they are checked in.`))),
+      sel ? scoreForm(sel, crits, locked, list) : h('div.panel.muted', `Pick ${isMakers() ? 'an entry' : 'a contestant'} to score.`)));
 }
 
 // Move the judge to another contestant and bring the score sheet into view (it sits below the list on phones).
@@ -925,10 +1030,10 @@ function scoreForm(p, crits, locked, list) {
       h('button.btn.sm.ghost', { disabled: !prev, onclick: () => goJudge(prev.id) }, '← Prev'),
       h('span.pos', idx >= 0 ? `${idx + 1} of ${list.length}` : ''),
       h('button.btn.sm.ghost', { disabled: !next, onclick: () => goJudge(next.id) }, 'Next →')),
-    h('div.row.between', h('div', h('span.kicker', p.division || 'Contestant'), h('h2', { style: { margin: 0 } }, partLabel(p)),
-      h('div.muted', [p.character, p.series].filter(Boolean).join(' — '))),
+    h('div.row.between', h('div', h('span.kicker', p.division || WORDS().One), h('h2', { style: { margin: 0 } }, partLabel(p)),
+      h('div.muted', partSub(p))),
     live?.submitted ? h('span.badge.submitted', 'Submitted') : live ? h('span.badge.draft', 'Draft — saved on device') : null),
-    p.judgeNotes ? h('div.banner.info', { style: { marginTop: '.75rem' } }, h('span.tag', 'Build notes'), h('span.grow', p.judgeNotes)) : null,
+    p.judgeNotes ? h('div.banner.info', { style: { marginTop: '.75rem' } }, h('span.tag', isMakers() ? 'Maker notes' : 'Build notes'), h('span.grow', p.judgeNotes)) : null,
     sc?.deleted ? h('div.banner.warn', 'An admin cleared your earlier score for this contestant.') : null,
     crits.map(c => {
       const v = live?.values?.[c.id];
@@ -951,7 +1056,7 @@ function scoreForm(p, crits, locked, list) {
             if (!complete && !confirm('Some criteria have no score. Submit anyway? Blank criteria count as 0.')) return;
             set({ submitted: true });
             if (nextUnscored) { toast(`Submitted ${partLabel(p)}. Next up: ${partLabel(nextUnscored)}`, 'ok'); goJudge(nextUnscored.id); }
-            else toast(`Submitted ${partLabel(p)}. You've scored everyone in your list.`, 'ok');
+            else toast(`Submitted ${partLabel(p)}. You've scored every ${WORDS().one} in your list.`, 'ok');
           },
         }, nextUnscored ? 'Submit & next' : 'Submit score')));
 }
@@ -988,7 +1093,9 @@ function viewResults() {
   const max = maxTotal(crits);
   const checkedIn = participants().filter(p => p.checkedIn).length;
   const fully = rows.filter(r => r.n >= judgeCount && judgeCount > 0).length;
-  const subCount = Object.values(S.data.scores).filter(s => s.submitted && !s.deleted).length;
+  const subCount = Object.values(S.data.scores).filter(s => s.submitted && !s.deleted && inCur(s)).length;
+  const W = WORDS();
+  const canEdit = manages();
   const best = rows.filter(r => r.avg != null).sort((a, b) => b.avg - a.avg)[0];
   const divOrder = [...(st.divisions || []), ...Object.keys(byDiv).filter(d => !(st.divisions || []).includes(d))].filter(d => byDiv[d]);
 
@@ -1000,54 +1107,58 @@ function viewResults() {
       h('div.tile', { class: st.scoresLocked ? 'on' : '' }, h('div.v.word', st.scoresLocked ? 'Locked' : 'Open'), h('div.l', 'Scoring'))),
     h('div.panel.row.between.no-print',
       h('div.row',
-        h('button.btn', { class: st.scoresLocked ? '' : 'warn', onclick: () => { if (confirm(st.scoresLocked ? 'Unlock scoring so judges can edit again?' : 'Lock scoring? Judges will no longer be able to change scores.')) mutate('settings', 'event', { scoresLocked: !st.scoresLocked }); } }, st.scoresLocked ? 'Unlock scoring' : 'Lock scoring'),
+        canEdit ? h('button.btn', { class: st.scoresLocked ? '' : 'warn', onclick: () => { if (confirm(st.scoresLocked ? 'Unlock scoring so judges can edit again?' : 'Lock scoring? Judges will no longer be able to change scores.')) mutate('contests', curId(), { scoresLocked: !st.scoresLocked }); } }, st.scoresLocked ? 'Unlock scoring' : 'Lock scoring') : null,
         h('label.check', h('input', { type: 'checkbox', checked: ui.includeDrafts, onchange: e => { ui.includeDrafts = e.target.checked; render(); } }), 'Include unsubmitted drafts')),
       h('div.row',
         h('button.btn', { onclick: () => window.print() }, 'Print'),
         h('button.btn', { onclick: () => exportResults(byDiv, crits) }, 'Export CSV'))),
     best ? h('div.panel.accent', h('span.kicker', 'Highest overall score'), h('h2', { style: { margin: '.2rem 0' } }, partLabel(best.p)),
-      h('div.muted', [best.p.character, best.p.series, best.p.division].filter(Boolean).join(' · '), ` — ${fmt1(best.avg)} / ${max}`)) : null,
+      h('div.muted', partSub(best.p), ` — ${fmt1(best.avg)} / ${max}`)) : null,
     divOrder.length ? divOrder.map(div => h('div.panel',
       h('h3', div),
       h('div.table-wrap', h('table',
-        h('thead', h('tr', h('th', 'Rank'), h('th', '#'), h('th', 'Contestant'), h('th.r', 'Judges'), crits.map(c => h('th.r', { title: c.name }, c.name.split(/[ /]/)[0])), h('th.r', 'Average'), h('th.r', '%'))),
-        h('tbody', byDiv[div].map(r => h('tr.click', { onclick: () => { location.hash = '#/review/' + r.p.id; } },
+        h('thead', h('tr', h('th', 'Rank'), h('th', '#'), h('th', W.One), h('th.r', 'Judges'), crits.map(c => h('th.r', { title: c.name }, c.name.split(/[ /]/)[0])), h('th.r', 'Average'), h('th.r', '%'))),
+        h('tbody', byDiv[div].map(r => h('tr', { class: canEdit ? 'click' : '', onclick: canEdit ? () => { location.hash = '#/review/' + r.p.id; } : null },
           h('td', r.rank ? h('span', h('span.rank', { class: r.rank <= 3 ? 'r' + r.rank : '' }, r.rank), r.tie ? h('span.badge.tie', { style: { marginLeft: '.4rem' } }, 'tie') : null) : h('span.muted', '—')),
           h('td.mono', r.p.number),
-          h('td', h('div', r.p.name), h('div.small.muted', r.p.character || '')),
+          h('td', h('div', r.p.title || r.p.name), h('div.small.muted', r.p.title ? (r.p.name ? 'by ' + r.p.name : '') : (r.p.character || ''))),
           h('td.r', { style: { color: r.n < judgeCount ? 'var(--warn)' : '' } }, `${r.n}/${judgeCount}`),
           crits.map(c => h('td.r', fmt1(r.critAvg[c.id]))),
           h('td.r', h('b', fmt1(r.avg))),
           h('td.r.muted', r.avg != null && max ? Math.round(r.avg / max * 100) + '%' : '—')))))))) : h('div.panel.muted', 'No scores yet.'),
-    h('p.small.muted', 'Average = mean of each judge\'s weighted total. Ties are flagged, not broken automatically. Click a row to see or adjust individual scores.'));
+    h('p.small.muted', 'Average = mean of each judge\'s weighted total. Ties are flagged, not broken automatically.' + (canEdit ? ' Click a row to see or adjust individual scores.' : '')));
 }
 function exportResults(byDiv, crits) {
-  const lines = [['Division', 'Rank', 'Tie', 'Number', 'Name', 'Character', 'Series', 'Judges', ...crits.map(c => c.name + ' (avg)'), 'Average total'].map(csvCell).join(',')];
+  const W = WORDS();
+  const who = isMakers() ? ['Entry', 'Maker', 'Materials'] : ['Name', 'Character', 'Series'];
+  const whoOf = p => isMakers() ? [p.title, p.name, p.materials] : [p.name, p.character, p.series];
+  const lines = [[W.division, 'Rank', 'Tie', 'Number', ...who, 'Judges', ...crits.map(c => c.name + ' (avg)'), 'Average total'].map(csvCell).join(',')];
   for (const [div, list] of Object.entries(byDiv)) for (const r of list) {
-    lines.push([div, r.rank ?? '', r.tie ? 'yes' : '', r.p.number, r.p.name, r.p.character, r.p.series, r.n, ...crits.map(c => r.critAvg[c.id] == null ? '' : r.critAvg[c.id].toFixed(2)), r.avg == null ? '' : r.avg.toFixed(2)].map(csvCell).join(','));
+    lines.push([div, r.rank ?? '', r.tie ? 'yes' : '', r.p.number, ...whoOf(r.p), r.n, ...crits.map(c => r.critAvg[c.id] == null ? '' : r.critAvg[c.id].toFixed(2)), r.avg == null ? '' : r.avg.toFixed(2)].map(csvCell).join(','));
   }
-  // Second section: raw score sheets
-  lines.push('', ['Number', 'Name', 'Judge', 'Submitted', ...crits.map(c => c.name), 'Total', 'Comment'].map(csvCell).join(','));
-  for (const s of Object.values(S.data.scores).filter(x => !x.deleted)) {
+  // Second section: raw score sheets (comments are not sent to view-only accounts)
+  lines.push('', ['Number', who[0], 'Judge', 'Submitted', ...crits.map(c => c.name), 'Total', 'Comment'].map(csvCell).join(','));
+  for (const s of Object.values(S.data.scores).filter(x => !x.deleted && inCur(x))) {
     const p = S.data.participants[s.participantId]; if (!p || p.deleted) continue;
-    lines.push([p.number, p.name, userName(s.judgeId), s.submitted ? 'yes' : 'no', ...crits.map(c => s.values?.[c.id] ?? ''), scoreTotal(s, crits).total, s.comment || ''].map(csvCell).join(','));
+    lines.push([p.number, p.title || p.name, userName(s.judgeId), s.submitted ? 'yes' : 'no', ...crits.map(c => s.values?.[c.id] ?? ''), scoreTotal(s, crits).total, s.comment || ''].map(csvCell).join(','));
   }
-  download(`results-${new Date().toISOString().slice(0, 10)}.csv`, lines.join('\n'));
+  const slug = settings().name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'results';
+  download(`${slug}-results-${new Date().toISOString().slice(0, 10)}.csv`, lines.join('\n'));
 }
 
 // ============================================================ score review & adjust (admin)
 function viewReview(pid) {
   const list = participants().filter(p => p.checkedIn || p.status === 'done' || Object.values(S.data.scores).some(s => s.participantId === p.id)).sort(byNum);
   const p = S.data.participants[pid] || null;
-  const search = h('input', { type: 'search', placeholder: 'Find contestant…', oninput: e => { const q = e.target.value.toLowerCase(); listEl.querySelectorAll('.item').forEach(it => it.classList.toggle('hidden', !it.textContent.toLowerCase().includes(q))); } });
+  const search = h('input', { type: 'search', placeholder: `Find ${WORDS().one}…`, oninput: e => { const q = e.target.value.toLowerCase(); listEl.querySelectorAll('.item').forEach(it => it.classList.toggle('hidden', !it.textContent.toLowerCase().includes(q))); } });
   const listEl = h('div.list', list.map(x => {
     const n = Object.values(S.data.scores).filter(s => s.participantId === x.id && s.submitted && !s.deleted).length;
     return h('div.item', { class: x.id === pid ? 'sel' : '', onclick: () => { location.hash = '#/review/' + x.id; } },
-      h('div.num', x.number || '–'), h('div.who', h('div.n', x.name), h('div.c', x.character || '')), h('span.badge', n === 1 ? '1 sheet' : n + ' sheets'));
+      h('div.num', x.number || '–'), h('div.who', h('div.n', x.title || x.name), h('div.c', partSub(x))), h('span.badge', n === 1 ? '1 sheet' : n + ' sheets'));
   }));
   return h('div.grid.cols-2',
-    h('div.panel.stack', h('h3', 'Contestants'), search, listEl),
-    p ? reviewDetail(p) : h('div.panel.muted', 'Select a contestant to see every judge\'s sheet.'));
+    h('div.panel.stack', h('h3', WORDS().Many), search, listEl),
+    p && inCur(p) ? reviewDetail(p) : h('div.panel.muted', `Select ${isMakers() ? 'an entry' : 'a contestant'} to see every judge's sheet.`));
 }
 
 function reviewDetail(p) {
@@ -1060,7 +1171,7 @@ function reviewDetail(p) {
 
   return h('div.stack',
     h('div.panel',
-      h('div.row.between', h('div', h('h2', { style: { margin: 0 } }, partLabel(p)), h('div.muted', [p.character, p.series, p.division].filter(Boolean).join(' · '))),
+      h('div.row.between', h('div', h('h2', { style: { margin: 0 } }, partLabel(p)), h('div.muted', partSub(p))),
         h('span.badge', { class: p.status }, (p.status || '').replace('_', ' '))),
       h('div.table-wrap', { style: { marginTop: '1rem' } }, h('table',
         h('thead', h('tr', h('th', 'Judge'), crits.map(c => h('th.r', c.name.split(/[ /]/)[0])), h('th.r', 'Total'), h('th', 'Status'), h('th', ''))),
@@ -1110,12 +1221,13 @@ function editScore(p, j, s) {
   ]);
 }
 
-// ============================================================ audit log (admin)
+// ============================================================ audit log (admin, contest lead)
 function describeAudit(a) {
   const p = S.data.participants[a.participantId || a.target];
   const pl = p ? partLabel(p) : (a.label || '');
-  const crits = criteria();
+  const crits = Object.values(S.data.criteria).filter(c => c.contestId === (a.contestId || curId()) && !c.deleted).sort((x, y) => (x.order ?? 0) - (y.order ?? 0));
   const vals = v => v ? crits.map(c => `${c.name.split(/[ /]/)[0]} ${v[c.id] ?? '–'}`).join(', ') : '';
+  const kv2 = o => Object.entries(o || {}).map(([k, v]) => `${k}=${Array.isArray(v) ? v.join('/') : v}`).join(', ');
   switch (a.action) {
     case 'score.edit': return h('span', h('b', a.username), ` changed ${userName(a.judgeId)}'s score for ${pl}`, a.reason ? h('span', ' — “', h('i', a.reason), '”') : '',
       h('div.muted', 'before: ', vals(a.before?.values) || 'none', ' → after: ', vals(a.after?.values), a.after?.submitted === false ? ' (not submitted)' : ''));
@@ -1123,17 +1235,20 @@ function describeAudit(a) {
     case 'participant.checkin': return h('span', h('b', a.username), ` checked in ${a.label}`);
     case 'participant.checkout': return h('span', h('b', a.username), ` undid check-in for ${a.label}`);
     case 'participant.delete': return h('span', h('b', a.username), ` deleted ${a.label}`);
-    case 'settings.update': return h('span', h('b', a.username), ' changed event settings: ', Object.entries(a.after || {}).map(([k, v]) => `${k}=${Array.isArray(v) ? v.join('/') : v}`).join(', '));
+    case 'settings.update': return h('span', h('b', a.username), ' changed the event name: ', kv2(a.after));
+    case 'contest.create': return h('span', h('b', a.username), ` created contest ${a.label}`);
+    case 'contests.update': return h('span', h('b', a.username), ' changed contest settings: ', kv2(a.after));
     case 'criteria.update': return h('span', h('b', a.username), ` changed criterion ${S.data.criteria[a.target]?.name || a.target}`);
-    case 'user.create': return h('span', h('b', a.username), ` created user ${a.label}`);
-    case 'user.update': return h('span', h('b', a.username), ` updated user ${a.label}`);
+    case 'user.create': return h('span', h('b', a.username), ` created account ${a.label}`);
+    case 'user.update': return h('span', h('b', a.username), ` updated account ${a.label}`);
     case 'user.password': return h('span', h('b', a.username), ' changed their password');
     case 'data.restore': return h('span', h('b', a.username), ' ', a.label);
     default: return h('span', h('b', a.username), ' ', a.action, ' ', a.label || '');
   }
 }
 function viewAudit() {
-  const all = Object.values(S.data.audit).sort((a, b) => b.ts - a.ts);
+  // This contest's entries; admins also see account changes (no contest attached).
+  const all = Object.values(S.data.audit).filter(a => a.contestId === curId() || (isAdmin() && !a.contestId)).sort((a, b) => b.ts - a.ts);
   const listEl = h('div.list');
   const draw = () => {
     const q = ui.auditQ.toLowerCase();
@@ -1146,12 +1261,21 @@ function viewAudit() {
     h('input', { type: 'search', placeholder: 'Filter (name, judge, action)…', value: ui.auditQ, oninput: e => { ui.auditQ = e.target.value; draw(); } }), listEl);
 }
 
-// ============================================================ setup (admin)
+// ============================================================ contest setup (admin, contest lead)
+const TYPE_INFO = {
+  cosplay: { label: 'Cosplay', hint: 'Stage walk with timer and confidence monitor' },
+  makers: { label: 'Makers', hint: 'Judged at tables; no stage or timer' },
+};
+const DEFAULT_DIVISIONS = { cosplay: ['Novice', 'Journeyman', 'Master'], makers: ['Props', 'Armor', 'Wearables', 'Other'] };
+
 function viewSetup() {
   const st = settings();
+  const W = WORDS();
+  const cid = curId();
   const ed = ui.eventDraft;
   const keep = k => e => { ed[k] = e.target.value; };
   const name = h('input', { type: 'text', value: ed.name ?? (st.name || ''), oninput: keep('name') });
+  const type = h('select', { onchange: keep('type'), disabled: !isAdmin() }, Object.entries(TYPE_INFO).map(([k, v]) => h('option', { value: k, selected: (ed.type ?? st.type) === k }, `${v.label} — ${v.hint}`)));
   const secs = h('input', { type: 'number', min: 5, value: ed.secs ?? st.stageSeconds, oninput: keep('secs') });
   const warn = h('input', { type: 'number', min: 0, value: ed.warn ?? st.warnSeconds, oninput: keep('warn') });
   const divs = h('input', { type: 'text', value: ed.divs ?? (st.divisions || []).join(', '), oninput: keep('divs') });
@@ -1159,19 +1283,27 @@ function viewSetup() {
   const online = S.net === 'online';
 
   return h('div.stack',
-    h('div.panel.stack', h('h3', 'Event'),
+    h('div.panel.stack', h('h3', 'Contest'),
       h('div.form-grid',
-        h('label.field', h('span', 'Event name'), name),
+        h('label.field', h('span', 'Contest name'), name),
+        h('label.field', h('span', 'Type' + (isAdmin() ? '' : ' (set by an admin)')), type)),
+      isMakers() ? null : h('div.form-grid',
         h('label.field', h('span', 'Stage time per contestant (seconds)'), secs),
         h('label.field', h('span', 'Warning when this many seconds remain'), warn)),
-      h('label.field', h('span', 'Divisions (comma separated)'), divs),
+      h('label.field', h('span', `${W.divisions} (comma separated)`), divs),
       h('div', h('button.btn.primary', {
         onclick: () => {
+          const patch = { name: name.value.trim() || st.name, divisions: divs.value.split(',').map(x => x.trim()).filter(Boolean) };
+          if (!isMakers()) Object.assign(patch, { stageSeconds: Number(secs.value) || 90, warnSeconds: Number(warn.value) || 0 });
+          if (isAdmin() && type.value !== st.type) {
+            if (!confirm(`Switch this contest to ${TYPE_INFO[type.value].label}? Existing ${W.many} and scores are kept; the screens and wording change.`)) return;
+            patch.type = type.value;
+          }
           ui.eventDraft = {};
-          mutate('settings', 'event', { name: name.value.trim() || 'Cosplay Contest', stageSeconds: Number(secs.value) || 90, warnSeconds: Number(warn.value) || 0, divisions: divs.value.split(',').map(s => s.trim()).filter(Boolean) });
-          toast('Event settings saved', 'ok');
+          mutate('contests', cid, patch);
+          toast('Contest settings saved', 'ok');
         },
-      }, 'Save event settings'))),
+      }, 'Save contest settings'))),
 
     h('div.panel.stack', h('h3', 'Judging criteria'),
       h('p.small.muted', 'Each judge scores every criterion from 0 to its max. Weight multiplies that criterion in the total. Changing criteria after judging starts affects every total — lock in before the show.'),
@@ -1187,31 +1319,43 @@ function viewSetup() {
             h('td', { style: { width: '90px' } }, h('input', { type: 'number', min: 0, step: 0.1, value: c.weight ?? 1, onchange: upd('weight', Number) })),
             h('td', h('button.btn.sm.danger', { onclick: () => { if (confirm(`Remove "${c.name}"? Existing scores for it will stop counting.`)) mutate('criteria', c.id, { deleted: true }); } }, 'Remove')));
         })))),
-      h('div', h('button.btn', { onclick: () => mutate('criteria', newId(), { name: 'New criterion', description: '', max: 10, weight: 1, order: (crits.at(-1)?.order ?? 0) + 1 }) }, '+ Add criterion'))),
+      h('div', h('button.btn', { onclick: () => mutate('criteria', newId(), { contestId: cid, name: 'New criterion', description: '', max: 10, weight: 1, order: (crits.at(-1)?.order ?? 0) + 1 }) }, '+ Add criterion'))),
 
-    h('div.panel.stack', h('div.row.between', h('h3', 'Accounts'), online ? null : h('span.badge.draft', 'Needs connection')),
-      h('p.small.muted', 'Admins see everything. Coordinators get check-in, stage control and the monitor. Judges only see the scoring screen and their own scores.'),
-      usersTable(online)),
+    accessPanel(cid, online),
 
-    h('div.panel.stack', h('h3', 'Import contestants'),
-      h('p.small.muted', 'Paste rows from a spreadsheet or choose a CSV file. First row must be headers. Recognised columns: number, name, character, series, division, judge notes, notes, contact, checked in.'),
-      importBox()),
+    h('div.panel.stack', h('h3', `Import ${W.many}`),
+      h('p.small.muted', 'Paste rows from a spreadsheet or choose a CSV file. First row must be headers. Recognised columns: ' + (isMakers()
+        ? 'number, entry title, maker, category, materials, judge notes, notes, contact, checked in.'
+        : 'number, name, character, series, division, judge notes, notes, contact, checked in.')),
+      importBox(),
+      h('div', h('button.btn.ghost.sm', { onclick: () => download(isMakers() ? 'makers-entries-template.csv' : 'contestant-template.csv', isMakers()
+        ? 'number,entry title,maker,category,materials,judge notes,notes,contact\n1,Mjolnir replica,Sam Lee,Props,"EVA foam, resin, LEDs","Build log in binder",Fragile - table 4,sam@example.com\n'
+        : 'number,name,character,series,division,judge notes,notes,contact\n1,Jane Doe,Aloy,Horizon Zero Dawn,Novice,"EVA foam bow, 3D printed focus",Needs ramp,jane@example.com\n') }, 'Download CSV template'))));
+}
 
-    githubPanel(online),
-
-    h('div.panel.stack', h('h3', 'Downloads'),
-      h('div.row',
-        h('button.btn', { onclick: () => download('contestant-template.csv', 'number,name,character,series,division,judge notes,notes,contact\n1,Jane Doe,Aloy,Horizon Zero Dawn,Novice,"EVA foam bow, 3D printed focus",Needs ramp,jane@example.com\n') }, 'Download CSV template'),
-        h('button.btn', {
-          disabled: !online,
-          onclick: async () => {
-            try {
-              const res = await fetch(serverBase() + '/api/backup', { headers: { Authorization: 'Bearer ' + S.account.token } });
-              if (!res.ok) throw new Error();
-              download(`contest-backup-${new Date().toISOString().slice(0, 10)}.json`, await res.text(), 'application/json');
-            } catch { toast('Backup needs a connection to the server', 'bad'); }
-          },
-        }, 'Download backup (no passwords)'))));
+/** Who can see this contest, and as what. Admins edit; leads can see the list. */
+function accessPanel(cid, online) {
+  const people = Object.values(S.data.users).sort((a, b) => a.displayName.localeCompare(b.displayName));
+  const members = people.filter(u => (u.contests || {})[cid]);
+  const roleNote = { lead: 'runs this contest', coordinator: 'check-in & stage', judge: 'scores', viewer: 'read-only' };
+  if (!isAdmin()) {
+    return h('div.panel.stack', h('h3', 'Who has access'),
+      h('p.small.muted', 'Ask an admin to add or remove people.'),
+      members.length ? h('div.list', members.map(u => h('div.item', { style: { cursor: 'default' } }, h('div.who', h('div.n', u.displayName), h('div.c', u.username)), h('span.badge.checked_in', u.contests[cid])))) : h('p.muted', 'Nobody yet.'));
+  }
+  const setRole = async (u, r) => {
+    try { await api('/api/users/' + u.id, { contests: { [cid]: r || null } }, { method: 'PATCH', token: S.account.token }); toast(`${u.displayName}: ${r || 'no access'}`, 'ok'); sync(); }
+    catch (e) { toast(e.status ? e.message : 'You need to be online to change access', 'bad'); render(); }
+  };
+  return h('div.panel.stack', h('div.row.between', h('h3', 'Who has access'), online ? null : h('span.badge.draft', 'Needs connection')),
+    h('p.small.muted', 'Pick a role in this contest for each person. Lead runs the contest; coordinator does check-in and stage; judge scores; viewer sees results only. Admins always have full access. Create new accounts on the Admin page.'),
+    h('div.table-wrap', h('table.edit-table',
+      h('thead', h('tr', h('th', 'Person'), h('th', 'Role in this contest'))),
+      h('tbody', people.map(u => h('tr', { style: { opacity: u.active ? 1 : .5 } },
+        h('td', h('div', u.displayName), h('div.small.muted', u.username)),
+        h('td', u.role === 'admin' ? h('span.badge.checked_in', 'admin · all contests') : h('select', { disabled: !online, onchange: e => setRole(u, e.target.value) },
+          h('option', { value: '' }, 'No access'),
+          ['lead', 'coordinator', 'judge', 'viewer'].map(r => h('option', { value: r, selected: (u.contests || {})[cid] === r }, `${r} — ${roleNote[r]}`))))))))));
 }
 
 function githubPanel(online) {
@@ -1241,67 +1385,168 @@ function githubPanel(online) {
   return h('div.panel.stack', h('h3', 'GitHub data copy'), body);
 }
 
-function usersTable(online) {
-  const users = Object.values(S.data.users).sort((a, b) => a.role.localeCompare(b.role) || a.displayName.localeCompare(b.displayName));
+// ============================================================ admin (account-wide)
+function viewAdmin() {
+  const online = S.net === 'online';
+  const evName = h('input', { type: 'text', placeholder: 'e.g. Winter Con 2026', value: ui.eventNameDraft ?? eventName(), oninput: e => { ui.eventNameDraft = e.target.value; } });
+  return h('div.stack',
+    h('div.panel.stack', h('h3', 'Event'),
+      h('p.small.muted', 'Shown above the contest name in the title bar and on the monitors. Optional.'),
+      h('div.row', h('div.grow', evName), h('button.btn.primary', { onclick: () => { ui.eventNameDraft = undefined; mutate('settings', 'event', { name: evName.value.trim() }); toast('Event name saved', 'ok'); } }, 'Save'))),
+    contestsPanel(),
+    h('div.panel.stack', h('div.row.between', h('h3', 'Accounts'), online ? null : h('span.badge.draft', 'Needs connection')),
+      h('p.small.muted', 'Each account gets a role per contest, or is an admin who sees and manages everything. New accounts and password resets must choose their own password at first sign-in.'),
+      accountsPanel(online)),
+    githubPanel(online),
+    h('div.panel.stack', h('h3', 'Backup'),
+      h('div', h('button.btn', {
+        disabled: !online,
+        onclick: async () => {
+          try {
+            const res = await fetch(serverBase() + '/api/backup', { headers: { Authorization: 'Bearer ' + S.account.token } });
+            if (!res.ok) throw new Error();
+            download(`spotlight-backup-${new Date().toISOString().slice(0, 10)}.json`, await res.text(), 'application/json');
+          } catch { toast('Backup needs a connection to the server', 'bad'); }
+        },
+      }, 'Download full backup (no passwords)'))));
+}
+
+function contestsPanel() {
+  const all = Object.values(S.data.contests).filter(c => !c.deleted).sort((a, b) => (!!a.archived - !!b.archived) || (a.order ?? 0) - (b.order ?? 0));
+  const d = ui.newContest ||= { name: '', type: 'cosplay' };
+  const name = h('input', { type: 'text', placeholder: 'Contest name, e.g. Saturday Masquerade', value: d.name, oninput: e => { d.name = e.target.value; } });
+  const type = h('select', { onchange: e => { d.type = e.target.value; } }, Object.entries(TYPE_INFO).map(([k, v]) => h('option', { value: k, selected: d.type === k }, `${v.label} — ${v.hint}`)));
+  const count = (coll, c, f = () => true) => Object.values(S.data[coll]).filter(x => x.contestId === c.id && !x.deleted && f(x)).length;
+  const people = (c, r) => Object.values(S.data.users).filter(u => (u.contests || {})[c.id] === r).length;
+  return h('div.panel.stack', h('h3', 'Contests'),
+    all.length ? h('div.table-wrap', h('table',
+      h('thead', h('tr', h('th', 'Contest'), h('th', 'Type'), h('th.r', 'Entries'), h('th.r', 'Judges'), h('th.r', 'Leads'), h('th', ''))),
+      h('tbody', all.map(c => h('tr', { style: { opacity: c.archived ? .55 : 1 } },
+        h('td', h('b', c.name), c.archived ? h('span.badge', { style: { marginLeft: '8px' } }, 'archived') : null, c.id === curId() ? h('span.badge.checked_in', { style: { marginLeft: '8px' } }, 'open now') : null),
+        h('td', TYPE_INFO[c.type]?.label || c.type),
+        h('td.r', count('participants', c)),
+        h('td.r', people(c, 'judge')),
+        h('td.r', people(c, 'lead')),
+        h('td', h('div.row', { style: { justifyContent: 'flex-end', flexWrap: 'nowrap' } },
+          c.archived ? null : h('button.btn.sm', { onclick: () => setContest(c.id) }, 'Open'),
+          h('button.btn.sm.ghost', {
+            onclick: () => {
+              if (!c.archived && !confirm(`Archive "${c.name}"? It disappears for everyone except admins. Its data is kept and you can restore it any time.`)) return;
+              mutate('contests', c.id, { archived: !c.archived });
+            },
+          }, c.archived ? 'Restore' : 'Archive'))))))))
+      : h('p.muted', 'No contests yet. Create the first one below.'),
+    h('h3', 'New contest'),
+    h('div.form-grid', name, type),
+    h('div', h('button.btn.primary', {
+      onclick: () => {
+        const nm = name.value.trim();
+        if (!nm) { toast('Give the contest a name', 'bad'); return; }
+        const id = newId();
+        // Defaults mirror the server's, so the contest is usable right away (the server adds the criteria).
+        mutate('contests', id, { name: nm, type: d.type, stageSeconds: 90, warnSeconds: 15, divisions: DEFAULT_DIVISIONS[d.type], scoresLocked: false, order: all.length + 1 });
+        ui.newContest = { name: '', type: 'cosplay' };
+        toast(`Created ${nm}. Default criteria arrive with the next sync; give people access in its Contest setup.`, 'ok');
+        setContest(id);
+      },
+    }, icon('plus'), 'Create contest')));
+}
+
+function accountsPanel(online) {
+  const users = Object.values(S.data.users).sort((a, b) => (a.role === 'admin' ? 0 : 1) - (b.role === 'admin' ? 0 : 1) || a.displayName.localeCompare(b.displayName));
+  const contests = Object.values(S.data.contests).filter(c => !c.deleted).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
   const call = async (fn, okMsg) => {
     try { await fn(); toast(okMsg, 'ok'); sync(); } catch (e) { toast(e.status ? e.message : 'You need to be online to manage accounts', 'bad'); }
   };
+  const access = u => u.role === 'admin' ? [h('span.badge.checked_in', 'admin · all contests')]
+    : Object.entries(u.contests || {}).filter(([cid]) => S.data.contests[cid] && !S.data.contests[cid].deleted)
+      .map(([cid, r]) => h('span.badge', { style: { marginRight: '4px' } }, `${S.data.contests[cid].name}: ${r}`));
   const d = ui.newUser;
   const keep = k => e => { d[k] = e.target.value; };
   const nu = {
-    username: h('input', { type: 'text', placeholder: 'username', autocapitalize: 'none', autocomplete: 'off', value: d.username || '', oninput: keep('username') }),
     displayName: h('input', { type: 'text', placeholder: 'Display name', value: d.displayName || '', oninput: keep('displayName') }),
+    username: h('input', { type: 'text', placeholder: 'username', autocapitalize: 'none', autocomplete: 'off', value: d.username || '', oninput: keep('username') }),
     password: h('input', { type: 'text', placeholder: 'Temporary password (8+, changed at first sign-in)', autocomplete: 'off', value: d.password || '', oninput: keep('password') }),
-    role: h('select', { onchange: keep('role') }, ['judge', 'coordinator', 'admin'].map(r => h('option', { value: r, selected: d.role === r }, r))),
+    kind: h('select', { onchange: keep('kind') }, h('option', { value: 'member', selected: d.kind !== 'admin' }, 'Member — access per contest'), h('option', { value: 'admin', selected: d.kind === 'admin' }, 'Admin — sees and manages everything')),
+    cid: h('select', { onchange: keep('cid') }, h('option', { value: '' }, 'Add to contest… (optional)'), contests.filter(c => !c.archived).map(c => h('option', { value: c.id, selected: d.cid === c.id }, c.name))),
+    crole: h('select', { onchange: keep('crole') }, ['judge', 'coordinator', 'lead', 'viewer'].map(r => h('option', { value: r, selected: (d.crole || 'judge') === r }, 'as ' + r))),
   };
   return h('div.stack',
     h('div.table-wrap', h('table.edit-table',
-      h('thead', h('tr', h('th', 'Name'), h('th', 'Username'), h('th', 'Role'), h('th', 'Status'), h('th', ''))),
+      h('thead', h('tr', h('th', 'Name'), h('th', 'Access'), h('th', ''))),
       h('tbody', users.map(u => h('tr', { style: { opacity: u.active ? 1 : .5 } },
-        h('td', u.displayName), h('td.mono', u.username),
-        h('td', h('select', { disabled: !online, onchange: e => call(() => api('/api/users/' + u.id, { role: e.target.value }, { method: 'PATCH', token: S.account.token }), 'Role changed') },
-          ['judge', 'coordinator', 'admin'].map(r => h('option', { value: r, selected: u.role === r }, r)))),
-        h('td', u.active ? 'active' : 'disabled'),
-        h('td', h('div.row', { style: { gap: '.3rem' } },
-          h('button.btn.sm', { disabled: !online, onclick: () => { const pw = prompt(`Temporary password for ${u.displayName} (8+ characters). They'll be asked to change it when they sign in:`); if (pw) call(() => api('/api/users/' + u.id, { password: pw }, { method: 'PATCH', token: S.account.token }), 'Password reset'); } }, 'Reset password'),
+        h('td', h('div', u.displayName, u.active ? null : h('span.badge.no_show', { style: { marginLeft: '6px' } }, 'disabled')), h('div.small.muted', u.username)),
+        h('td', access(u).length ? access(u) : h('span.muted.small', 'no contests')),
+        h('td', h('div.row', { style: { gap: '.3rem', flexWrap: 'nowrap', justifyContent: 'flex-end' } },
+          h('button.btn.sm', { disabled: !online, onclick: () => editAccess(u, contests, call) }, 'Access'),
+          h('button.btn.sm.ghost', { disabled: !online, onclick: () => { const pw = prompt(`Temporary password for ${u.displayName} (8+ characters). They'll be asked to change it when they sign in:`); if (pw) call(() => api('/api/users/' + u.id, { password: pw }, { method: 'PATCH', token: S.account.token }), 'Password reset'); } }, 'Reset password'),
           h('button.btn.sm.ghost', { disabled: !online || u.id === S.account.user.id, onclick: () => call(() => api('/api/users/' + u.id, { active: !u.active }, { method: 'PATCH', token: S.account.token }), u.active ? 'Account disabled' : 'Account enabled') }, u.active ? 'Disable' : 'Enable')))))))),
-    h('div.form-grid', nu.displayName, nu.username, nu.password, nu.role),
+    h('h3', 'New account'),
+    h('div.form-grid', nu.displayName, nu.username, nu.password),
+    h('div.form-grid', nu.kind, nu.cid, nu.crole),
     h('div', h('button.btn.primary', {
       disabled: !online,
       onclick: () => call(async () => {
-        await api('/api/users', { username: nu.username.value.trim(), displayName: nu.displayName.value.trim(), password: nu.password.value, role: nu.role.value }, { token: S.account.token });
-        ui.newUser = { role: nu.role.value };
+        const contestsMap = nu.kind.value !== 'admin' && nu.cid.value ? { [nu.cid.value]: nu.crole.value } : {};
+        await api('/api/users', { username: nu.username.value.trim(), displayName: nu.displayName.value.trim(), password: nu.password.value, role: nu.kind.value, contests: contestsMap }, { token: S.account.token });
+        ui.newUser = { kind: nu.kind.value, cid: nu.cid.value, crole: nu.crole.value };
         nu.username.value = nu.displayName.value = nu.password.value = '';
       }, 'Account created'),
-    }, '+ Create account')));
+    }, icon('plus'), 'Create account')));
+}
+
+function editAccess(u, contests, call) {
+  const admin = h('input', { type: 'checkbox', checked: u.role === 'admin', disabled: u.id === S.account.user.id });
+  const sel = {};
+  const rows = contests.map(c => h('label.field', h('span', c.name + (c.archived ? ' (archived)' : '')),
+    sel[c.id] = h('select', h('option', { value: '' }, 'No access'), ['lead', 'coordinator', 'judge', 'viewer'].map(r => h('option', { value: r, selected: (u.contests || {})[c.id] === r }, r)))));
+  const close = openModal(`Access · ${u.displayName}`, h('div.stack',
+    h('label.check', admin, 'Admin — sees and manages every contest and all accounts'),
+    h('p.small.muted', 'Per-contest roles (ignored while Admin is ticked):'),
+    contests.length ? h('div.form-grid', rows) : h('p.muted', 'No contests yet.')),
+  [
+    h('button.btn.ghost', { onclick: () => close() }, 'Cancel'),
+    h('button.btn.primary', {
+      onclick: () => {
+        const map = {}; for (const c of contests) map[c.id] = sel[c.id].value || null;
+        close();
+        call(() => api('/api/users/' + u.id, { role: admin.checked ? 'admin' : 'member', contests: map }, { method: 'PATCH', token: S.account.token }), 'Access updated');
+      },
+    }, 'Save access'),
+  ]);
 }
 
 function importBox() {
-  const ta = h('textarea', { rows: 6, placeholder: 'number,name,character,series,division\n1,Jane Doe,Aloy,Horizon Zero Dawn,Novice', oninput: e => { ui.importText = e.target.value; } }, ui.importText);
+  const makers = isMakers();
+  const W = WORDS();
+  const ta = h('textarea', { rows: 6, placeholder: makers ? 'number,entry title,maker,category,materials\n1,Mjolnir replica,Sam Lee,Props,EVA foam' : 'number,name,character,series,division\n1,Jane Doe,Aloy,Horizon Zero Dawn,Novice', oninput: e => { ui.importText = e.target.value; } }, ui.importText);
   const file = h('input', { type: 'file', accept: '.csv,.tsv,.txt', onchange: async e => { ta.value = ui.importText = await e.target.files[0].text(); } });
   const preview = h('div.small.muted');
-  const MAP = { number: 'number', '#': 'number', 'contestant #': 'number', 'entry': 'number', name: 'name', 'cosplayer': 'name', 'badge name': 'name', 'cosplay name': 'name', character: 'character', series: 'series', source: 'series', franchise: 'series', division: 'division', category: 'division', 'judge notes': 'judgeNotes', judgenotes: 'judgeNotes', 'build notes': 'judgeNotes', notes: 'notes', 'staff notes': 'notes', contact: 'contact', email: 'contact', phone: 'contact', 'checked in': 'checkedIn', checkedin: 'checkedIn' };
+  const COMMON = { number: 'number', '#': 'number', 'entry #': 'number', 'contestant #': 'number', 'judge notes': 'judgeNotes', judgenotes: 'judgeNotes', 'build notes': 'judgeNotes', notes: 'notes', 'staff notes': 'notes', contact: 'contact', email: 'contact', phone: 'contact', 'checked in': 'checkedIn', checkedin: 'checkedIn', division: 'division', category: 'division' };
+  const MAP = makers
+    ? { ...COMMON, entry: 'title', 'entry title': 'title', title: 'title', piece: 'title', maker: 'name', name: 'name', 'maker name': 'name', materials: 'materials', 'materials & techniques': 'materials', techniques: 'materials' }
+    : { ...COMMON, entry: 'number', name: 'name', cosplayer: 'name', 'badge name': 'name', 'cosplay name': 'name', character: 'character', series: 'series', source: 'series', franchise: 'series' };
   const parse = () => {
     const rows = parseCSV(ta.value.trim());
     if (rows.length < 2) return [];
     const cols = rows[0].map(c => MAP[c.trim().toLowerCase()] || null);
-    return rows.slice(1).map(r => { const o = {}; cols.forEach((k, i) => { if (k && r[i] != null) o[k] = r[i].trim(); }); return o; }).filter(o => o.name);
+    return rows.slice(1).map(r => { const o = {}; cols.forEach((k, i) => { if (k && r[i] != null) o[k] = r[i].trim(); }); return o; }).filter(o => o.name || o.title);
   };
   return h('div.stack', file, ta, preview, h('div.row',
-    h('button.btn', { onclick: () => { const r = parse(); preview.textContent = r.length ? `${r.length} contestants found. First: ${r[0].number || '?'} ${r[0].name} (${r[0].character || 'no character'})` : 'Nothing recognised — check the header row has a "name" column.'; } }, 'Preview'),
+    h('button.btn', { onclick: () => { const r = parse(); preview.textContent = r.length ? `${r.length} ${W.many} found. First: ${partLabel(r[0])}${partSub(r[0]) ? ' · ' + partSub(r[0]) : ''}` : `Nothing recognised — check the header row has a "${makers ? 'entry title or maker' : 'name'}" column.`; } }, 'Preview'),
     h('button.btn.primary', {
       onclick: () => {
         const r = parse();
         if (!r.length) { toast('Nothing to import', 'bad'); return; }
         const existing = new Set(participants().map(p => String(p.number)));
         const dup = r.filter(o => o.number && existing.has(String(o.number))).length;
-        if (!confirm(`Import ${r.length} contestants?${dup ? ` ${dup} have numbers that already exist (they'll be added as duplicates).` : ''}`)) return;
+        if (!confirm(`Import ${r.length} ${W.many} into ${settings().name}?${dup ? ` ${dup} have numbers that already exist (they'll be added as duplicates).` : ''}`)) return;
         let n = parseInt(nextNumber());
         r.forEach(o => {
           const ci = /^(y|yes|true|1|x)$/i.test(o.checkedIn || '');
-          mutate('participants', newId(), { ...o, number: o.number || String(n++), checkedIn: ci, status: ci ? 'checked_in' : 'registered' });
+          mutate('participants', newId(), { ...o, contestId: curId(), number: o.number || String(n++), checkedIn: ci, status: ci ? 'checked_in' : 'registered' });
         });
-        ta.value = ui.importText = ''; toast(`Imported ${r.length} contestants`, 'ok');
+        ta.value = ui.importText = ''; toast(`Imported ${r.length} ${W.many}`, 'ok');
       },
     }, 'Import')));
 }

@@ -167,7 +167,10 @@ export class ContestDB {
       const pair = new WebSocketPair();
       this.ctx.acceptWebSocket(pair[1]);
       pair[1].send(JSON.stringify({ type: 'rev', rev: this.contest.rev }));
-      pair[1].send(JSON.stringify({ type: 'stage', ...this.contest.stagePublic() }));
+      for (const cid of Object.keys(this.contest.db.data.contests)) {
+        const st = this.contest.stagePublic(cid);
+        if (st && st.type === 'cosplay') pair[1].send(JSON.stringify({ type: 'stage', ...st }));
+      }
       return new Response(null, { status: 101, webSocket: pair[0] });
     }
 
@@ -240,8 +243,8 @@ export class ContestDB {
         await this.contest.importSnapshot(snap, { keepSessions: true });
         this.contest.audit(admin, 'data.restore', { label: `Restored from GitHub (${this.gh.repo}/${this.gh.path}, saved ${snap.exportedAt})` });
         await this.contest.save();
+        this.contest.broadcastFlags();
         this.broadcast('rev', { rev: this.contest.rev });
-        this.broadcast('stage', this.contest.stagePublic());
         await this.ctx.storage.put('gh', { ...((await this.ctx.storage.get('gh')) || {}), lastPushRev: null, restoredAt: Date.now() });
         await this.scheduleFlush();
         return json(200, await status());
