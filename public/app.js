@@ -113,7 +113,7 @@ const S = {
   lastSync: 0,
   clockOffset: Number(localStorage.getItem('cj-offset')) || 0,
 };
-const ui = { ci: { q: '', filter: 'all', division: 'all' }, judgeSel: null, reviewSel: null, includeDrafts: false, auditQ: '' };
+const ui = { ci: { q: '', filter: 'all', division: 'all' }, judgeSel: null, reviewSel: null, includeDrafts: false, auditQ: '', newUser: { role: 'judge' }, eventDraft: {}, importText: '' };
 
 function serverBase() {
   return (localStorage.getItem('cj-server') ?? CFG.serverUrl ?? '').replace(/\/+$/, '');
@@ -224,7 +224,7 @@ async function sync({ full = false } = {}) {
     setNet('online');
     if (S.account.user.mustChangePassword) forcePasswordChange();
     persist();
-    scheduleRender();
+    if (res.changes.length || res.results.some(r => !r.ok) || full || res.reset) scheduleRender();
     if (prevRole !== res.user.role || (needFull && !full)) {
       if (prevRole !== res.user.role) toast('Your role changed to ' + res.user.role);
       syncing = false; return sync({ full: true }); // re-pull so nothing rejected lingers locally
@@ -241,8 +241,10 @@ async function sync({ full = false } = {}) {
 
 function setNet(n) {
   if (S.net === n) return;
+  const wasOnline = S.net === 'online';
   S.net = n;
   renderSync();
+  if (wasOnline !== (n === 'online') && route().name === 'setup') scheduleRender(); // enable/disable online-only buttons
 }
 
 // Live connection to the API (WebSocket): instant nudges when anything changes, and the stage timer.
@@ -269,7 +271,7 @@ function connectEvents() {
   sock.onclose = () => {
     if (ws !== sock) return; // replaced on purpose
     clearInterval(wsPing); monitorConn(false);
-    if (S.account && S.net === 'online') setNet('offline');
+    if (S.account) syncSoon(); // the next sync decides whether we're really offline
     setTimeout(() => { if (ws === sock) connectEvents(); }, wsRetry);
     wsRetry = Math.min(wsRetry * 2, 30000);
   };
@@ -379,14 +381,25 @@ const route = () => { const [name, ...args] = location.hash.replace(/^#\/?/, '')
 
 window.addEventListener('hashchange', () => render());
 
-let pendingRender = false;
-function scheduleRender() {
-  // Don't yank the DOM out from under someone who is typing.
+// Redraws must never pull the page out from under someone: not while they type in a field,
+// and not between pressing and releasing a button (that swallows the click).
+let pendingRender = false, pointerDown = false;
+function busy() {
+  if (pointerDown) return true;
   const a = document.activeElement;
-  if (a && $('#view')?.contains(a) && /INPUT|TEXTAREA|SELECT/.test(a.tagName) && a.type !== 'checkbox') { pendingRender = true; return; }
-  requestAnimationFrame(render);
+  return !!(a && $('#view')?.contains(a) && /INPUT|TEXTAREA|SELECT/.test(a.tagName) && a.type !== 'checkbox' && a.type !== 'file');
 }
-document.addEventListener('focusout', () => { if (pendingRender) { pendingRender = false; setTimeout(() => scheduleRender(), 0); } });
+function scheduleRender() {
+  if (busy()) { pendingRender = true; return; }
+  pendingRender = false;
+  requestAnimationFrame(() => { if (busy()) pendingRender = true; else render(); });
+}
+function flushRender() { if (pendingRender && !busy()) scheduleRender(); }
+document.addEventListener('pointerdown', () => { pointerDown = true; }, true);
+const releasePointer = () => { pointerDown = false; setTimeout(flushRender, 60); }; // after the click has been handled
+document.addEventListener('pointerup', releasePointer, true);
+document.addEventListener('pointercancel', releasePointer, true);
+document.addEventListener('focusout', () => setTimeout(flushRender, 0));
 
 let monitorActive = false;
 function render() {
@@ -516,7 +529,7 @@ async function renderLogin(app) {
       h('div.recent', recent.map(a => h('button.chip', { type: 'button', onclick: () => { user.value = a.username; pw.focus(); } }, a.user?.displayName || a.username)))) : null,
     user, pw, err, btn, serverInfo),
     h('p.small.muted', { style: { textAlign: 'center', marginTop: '1.5rem' } }, h('a', { href: '#/monitor' }, 'Open confidence monitor (no sign-in needed)'))));
-  setTimeout(() => user.focus(), 50);
+  setTimeout(() => { const a = document.activeElement; if (!a || a === document.body) user.focus(); }, 50); // never steal focus from a field already in use
 }
 
 // ============================================================ check-in (coordinator, admin)
@@ -1077,10 +1090,12 @@ function viewAudit() {
 // ============================================================ setup (admin)
 function viewSetup() {
   const st = settings();
-  const name = h('input', { type: 'text', value: st.name || '' });
-  const secs = h('input', { type: 'number', min: 5, value: st.stageSeconds });
-  const warn = h('input', { type: 'number', min: 0, value: st.warnSeconds });
-  const divs = h('input', { type: 'text', value: (st.divisions || []).join(', ') });
+  const ed = ui.eventDraft;
+  const keep = k => e => { ed[k] = e.target.value; };
+  const name = h('input', { type: 'text', value: ed.name ?? (st.name || ''), oninput: keep('name') });
+  const secs = h('input', { type: 'number', min: 5, value: ed.secs ?? st.stageSeconds, oninput: keep('secs') });
+  const warn = h('input', { type: 'number', min: 0, value: ed.warn ?? st.warnSeconds, oninput: keep('warn') });
+  const divs = h('input', { type: 'text', value: ed.divs ?? (st.divisions || []).join(', '), oninput: keep('divs') });
   const crits = criteria();
   const online = S.net === 'online';
 
@@ -1093,6 +1108,7 @@ function viewSetup() {
       h('label.field', h('span', 'Divisions (comma separated)'), divs),
       h('div', h('button.btn.primary', {
         onclick: () => {
+          ui.eventDraft = {};
           mutate('settings', 'event', { name: name.value.trim() || 'Cosplay Contest', stageSeconds: Number(secs.value) || 90, warnSeconds: Number(warn.value) || 0, divisions: divs.value.split(',').map(s => s.trim()).filter(Boolean) });
           toast('Event settings saved', 'ok');
         },
@@ -1171,7 +1187,14 @@ function usersTable(online) {
   const call = async (fn, okMsg) => {
     try { await fn(); toast(okMsg, 'ok'); sync(); } catch (e) { toast(e.status ? e.message : 'You need to be online to manage accounts', 'bad'); }
   };
-  const nu = { username: h('input', { type: 'text', placeholder: 'username', autocapitalize: 'none' }), displayName: h('input', { type: 'text', placeholder: 'Display name' }), password: h('input', { type: 'text', placeholder: 'Temporary password (8+, changed at first sign-in)', autocomplete: 'off' }), role: h('select', ['judge', 'coordinator', 'admin'].map(r => h('option', { value: r }, r))) };
+  const d = ui.newUser;
+  const keep = k => e => { d[k] = e.target.value; };
+  const nu = {
+    username: h('input', { type: 'text', placeholder: 'username', autocapitalize: 'none', autocomplete: 'off', value: d.username || '', oninput: keep('username') }),
+    displayName: h('input', { type: 'text', placeholder: 'Display name', value: d.displayName || '', oninput: keep('displayName') }),
+    password: h('input', { type: 'text', placeholder: 'Temporary password (8+, changed at first sign-in)', autocomplete: 'off', value: d.password || '', oninput: keep('password') }),
+    role: h('select', { onchange: keep('role') }, ['judge', 'coordinator', 'admin'].map(r => h('option', { value: r, selected: d.role === r }, r))),
+  };
   return h('div.stack',
     h('div.table-wrap', h('table',
       h('thead', h('tr', h('th', 'Name'), h('th', 'Username'), h('th', 'Role'), h('th', 'Status'), h('th', ''))),
@@ -1188,14 +1211,15 @@ function usersTable(online) {
       disabled: !online,
       onclick: () => call(async () => {
         await api('/api/users', { username: nu.username.value.trim(), displayName: nu.displayName.value.trim(), password: nu.password.value, role: nu.role.value }, { token: S.account.token });
+        ui.newUser = { role: nu.role.value };
         nu.username.value = nu.displayName.value = nu.password.value = '';
       }, 'Account created'),
     }, '+ Create account')));
 }
 
 function importBox() {
-  const ta = h('textarea', { rows: 6, placeholder: 'number,name,character,series,division\n1,Jane Doe,Aloy,Horizon Zero Dawn,Novice' });
-  const file = h('input', { type: 'file', accept: '.csv,.tsv,.txt', onchange: async e => { ta.value = await e.target.files[0].text(); } });
+  const ta = h('textarea', { rows: 6, placeholder: 'number,name,character,series,division\n1,Jane Doe,Aloy,Horizon Zero Dawn,Novice', oninput: e => { ui.importText = e.target.value; } }, ui.importText);
+  const file = h('input', { type: 'file', accept: '.csv,.tsv,.txt', onchange: async e => { ta.value = ui.importText = await e.target.files[0].text(); } });
   const preview = h('div.small.muted');
   const MAP = { number: 'number', '#': 'number', 'contestant #': 'number', 'entry': 'number', name: 'name', 'cosplayer': 'name', 'badge name': 'name', 'cosplay name': 'name', character: 'character', series: 'series', source: 'series', franchise: 'series', division: 'division', category: 'division', 'judge notes': 'judgeNotes', judgenotes: 'judgeNotes', 'build notes': 'judgeNotes', notes: 'notes', 'staff notes': 'notes', contact: 'contact', email: 'contact', phone: 'contact', 'checked in': 'checkedIn', checkedin: 'checkedIn' };
   const parse = () => {
@@ -1218,7 +1242,7 @@ function importBox() {
           const ci = /^(y|yes|true|1|x)$/i.test(o.checkedIn || '');
           mutate('participants', newId(), { ...o, number: o.number || String(n++), checkedIn: ci, status: ci ? 'checked_in' : 'registered' });
         });
-        ta.value = ''; toast(`Imported ${r.length} contestants`, 'ok');
+        ta.value = ui.importText = ''; toast(`Imported ${r.length} contestants`, 'ok');
       },
     }, 'Import')));
 }

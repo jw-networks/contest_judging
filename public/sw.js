@@ -1,6 +1,6 @@
 // Offline cache for the app shell. API calls always go to the network.
 // Bump VERSION when you change any file so devices pick up the update.
-const VERSION = 'cj-v2';
+const VERSION = 'cj-v3';
 const SHELL = ['./', 'index.html', 'app.js', 'styles.css', 'config.js', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', e => {
