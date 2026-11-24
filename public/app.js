@@ -1240,6 +1240,16 @@ function goJudge(id) {
   requestAnimationFrame(() => $('#scoreform')?.scrollIntoView({ block: 'start', behavior: 'smooth' }));
 }
 
+// Quick notes: one-tap praise tags judges tick while scoring, for feedback to contestants later.
+const quickNotes = () => settings().quickNotes || [];
+function noteTally(scores) {
+  const t = new Map();
+  for (const s of scores) for (const tag of s.tags || []) t.set(tag, (t.get(tag) || 0) + 1);
+  const order = quickNotes();
+  return [...t.entries()].sort((a, b) => b[1] - a[1] || (order.indexOf(a[0]) + 1 || 999) - (order.indexOf(b[0]) + 1 || 999) || a[0].localeCompare(b[0]));
+}
+const tallyText = tally => tally.map(([t, n]) => n > 1 ? `${t} (${n})` : t).join('; ');
+
 function scoreForm(p, crits, locked, list) {
   const id = scoreId(p.id);
   const idx = list.findIndex(x => x.id === p.id);
@@ -1273,6 +1283,7 @@ function scoreForm(p, crits, locked, list) {
         h('div.head', h('div', h('b', c.name), c.weight !== 1 ? h('span.muted.small', ` ×${c.weight}`) : null, c.description ? h('div.small.muted', c.description) : null),
           h('div.val', v ?? '–')), ctl);
     }),
+    quickNotesPicker(live, locked, set),
     h('div', { style: { marginTop: '1rem' } }, comment),
     h('div.total-bar',
       h('div', h('div.small.muted', 'Total'), h('div.t', fmt1(total), h('span.muted', { style: { fontSize: '1rem' } }, ` / ${maxTotal(crits)}`))),
@@ -1288,6 +1299,18 @@ function scoreForm(p, crits, locked, list) {
             else toast(`Submitted ${partLabel(p)}. You've scored every ${WORDS().one} in your list.`, 'ok');
           },
         }, nextUnscored ? 'Submit & next' : 'Submit score')));
+}
+
+function quickNotesPicker(live, locked, set) {
+  const picked = new Set(live?.tags || []);
+  const list = [...quickNotes(), ...[...picked].filter(t => !quickNotes().includes(t))]; // keep ticks for notes later removed from the list
+  if (!list.length) return null;
+  return h('div.quicknotes',
+    h('div.head', h('b', 'Quick notes'), h('span.small.muted', ' Tap anything that stood out. Used for feedback after the contest.')),
+    h('div.chips', list.map(t => h('button.chip.qn', {
+      type: 'button', class: picked.has(t) ? 'on' : '', disabled: locked, 'aria-pressed': picked.has(t) ? 'true' : 'false',
+      onclick: () => { const n = new Set(picked); n.has(t) ? n.delete(t) : n.add(t); set({ tags: list.filter(x => n.has(x)) }); },
+    }, picked.has(t) ? '✓ ' : '', t))));
 }
 
 // ============================================================ results (admin)
@@ -1350,7 +1373,8 @@ function viewResults() {
         h('tbody', byDiv[div].map(r => h('tr', { class: canEdit ? 'click' : '', onclick: canEdit ? () => { location.hash = '#/review/' + r.p.id; } : null },
           h('td', r.rank ? h('span', h('span.rank', { class: r.rank <= 3 ? 'r' + r.rank : '' }, r.rank), r.tie ? h('span.badge.tie', { style: { marginLeft: '.4rem' } }, 'tie') : null) : h('span.muted', '—')),
           h('td.mono', r.p.number),
-          h('td', h('div', r.p.title || r.p.name), h('div.small.muted', r.p.title ? (r.p.name ? 'by ' + r.p.name : '') : (r.p.character || ''))),
+          h('td', h('div', r.p.title || r.p.name), h('div.small.muted', r.p.title ? (r.p.name ? 'by ' + r.p.name : '') : (r.p.character || '')),
+            (() => { const t = noteTally(r.scores); return t.length ? h('div.note-tally', t.slice(0, 4).map(([tag, n]) => h('span.qtag', tag, n > 1 ? h('b', ' ×' + n) : null)), t.length > 4 ? h('span.small.muted', ` +${t.length - 4} more`) : null) : null; })()),
           h('td.r', { style: { color: r.n < judgeCount ? 'var(--warn)' : '' } }, `${r.n}/${judgeCount}`),
           crits.map(c => h('td.r', fmt1(r.critAvg[c.id]))),
           h('td.r', h('b', fmt1(r.avg))),
@@ -1361,15 +1385,15 @@ function exportResults(byDiv, crits) {
   const W = WORDS();
   const who = isMakers() ? ['Entry', 'Maker', 'Materials'] : ['Name', 'Character', 'Series'];
   const whoOf = p => isMakers() ? [p.title, p.name, p.materials] : [p.name, p.character, p.series];
-  const lines = [[W.division, 'Rank', 'Tie', 'Number', ...who, 'Judges', ...crits.map(c => c.name + ' (avg)'), 'Average total'].map(csvCell).join(',')];
+  const lines = [[W.division, 'Rank', 'Tie', 'Number', ...who, 'Judges', ...crits.map(c => c.name + ' (avg)'), 'Average total', 'Quick notes'].map(csvCell).join(',')];
   for (const [div, list] of Object.entries(byDiv)) for (const r of list) {
-    lines.push([div, r.rank ?? '', r.tie ? 'yes' : '', r.p.number, ...whoOf(r.p), r.n, ...crits.map(c => r.critAvg[c.id] == null ? '' : r.critAvg[c.id].toFixed(2)), r.avg == null ? '' : r.avg.toFixed(2)].map(csvCell).join(','));
+    lines.push([div, r.rank ?? '', r.tie ? 'yes' : '', r.p.number, ...whoOf(r.p), r.n, ...crits.map(c => r.critAvg[c.id] == null ? '' : r.critAvg[c.id].toFixed(2)), r.avg == null ? '' : r.avg.toFixed(2), tallyText(noteTally(r.scores))].map(csvCell).join(','));
   }
   // Second section: raw score sheets (comments are not sent to view-only accounts)
-  lines.push('', ['Number', who[0], 'Judge', 'Submitted', ...crits.map(c => c.name), 'Total', 'Comment'].map(csvCell).join(','));
+  lines.push('', ['Number', who[0], 'Judge', 'Submitted', ...crits.map(c => c.name), 'Total', 'Quick notes', 'Comment'].map(csvCell).join(','));
   for (const s of Object.values(S.data.scores).filter(x => !x.deleted && inCur(x))) {
     const p = S.data.participants[s.participantId]; if (!p || p.deleted) continue;
-    lines.push([p.number, p.title || p.name, userName(s.judgeId), s.submitted ? 'yes' : 'no', ...crits.map(c => s.values?.[c.id] ?? ''), scoreTotal(s, crits).total, s.comment || ''].map(csvCell).join(','));
+    lines.push([p.number, p.title || p.name, userName(s.judgeId), s.submitted ? 'yes' : 'no', ...crits.map(c => s.values?.[c.id] ?? ''), scoreTotal(s, crits).total, (s.tags || []).join('; '), s.comment || ''].map(csvCell).join(','));
   }
   const slug = settings().name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'results';
   download(`${slug}-results-${new Date().toISOString().slice(0, 10)}.csv`, lines.join('\n'));
@@ -1415,6 +1439,14 @@ function reviewDetail(p) {
               s && s.updatedBy && s.updatedBy !== j.id ? h('div.small.muted', 'edited by ' + userName(s.updatedBy)) : null),
             h('td', h('button.btn.sm', { onclick: () => editScore(p, j, s) }, live ? 'Adjust' : 'Enter')));
         })))),
+      (() => {
+        const live = rowsJ.map(scoreFor).filter(s => s && !s.deleted);
+        const tally = noteTally(live);
+        if (!tally.length) return null;
+        return h('div', { style: { marginTop: '1rem' } }, h('h3', 'Quick notes'),
+          h('div.note-tally', tally.map(([tag, n]) => h('span.qtag', { title: live.filter(s => (s.tags || []).includes(tag)).map(s => userName(s.judgeId)).join(', ') }, tag, h('b', ` ${n}/${live.length}`)))),
+          h('p.small.muted', 'Count = how many judges ticked it. Hover or long-press a note to see who.'));
+      })(),
       rowsJ.some(j => scoreFor(j)?.comment) ? h('div', { style: { marginTop: '1rem' } }, h('h3', 'Judge comments'),
         rowsJ.filter(j => scoreFor(j)?.comment).map(j => h('p', h('b', j.displayName + ': '), scoreFor(j).comment))) : null),
     h('div.panel', h('h3', 'History'), history.length ? h('div.list', history.map(a => h('div.small', h('span.muted', fmtTime(a.ts) + ' · '), describeAudit(a)))) : h('p.muted.small', 'No changes recorded.')));
@@ -1510,6 +1542,7 @@ function viewSetup() {
   const secs = h('input', { type: 'number', min: 5, value: ed.secs ?? st.stageSeconds, oninput: keep('secs') });
   const warn = h('input', { type: 'number', min: 0, value: ed.warn ?? st.warnSeconds, oninput: keep('warn') });
   const divs = h('input', { type: 'text', value: ed.divs ?? (st.divisions || []).join(', '), oninput: keep('divs') });
+  const notes = h('textarea', { rows: 6, placeholder: 'One per line, e.g. Exceptional electronics', oninput: keep('notes') }, ed.notes ?? (st.quickNotes || []).join('\n'));
   const crits = criteria();
   const online = S.net === 'online';
 
@@ -1522,9 +1555,11 @@ function viewSetup() {
         h('label.field', h('span', 'Stage time per contestant (seconds)'), secs),
         h('label.field', h('span', 'Warning when this many seconds remain'), warn)),
       h('label.field', h('span', `${W.divisions} (comma separated)`), divs),
+      h('label.field', h('span', 'Quick notes for judges (one per line)'), notes,
+        h('span.small.muted', 'Judges tick these while scoring. Removing one here keeps any ticks already made.')),
       h('div', h('button.btn.primary', {
         onclick: () => {
-          const patch = { name: name.value.trim() || st.name, divisions: divs.value.split(',').map(x => x.trim()).filter(Boolean) };
+          const patch = { name: name.value.trim() || st.name, divisions: divs.value.split(',').map(x => x.trim()).filter(Boolean), quickNotes: notes.value.split('\n').map(x => x.trim()).filter(Boolean) };
           if (!isMakers()) Object.assign(patch, { stageSeconds: Number(secs.value) || 90, warnSeconds: Number(warn.value) || 0 });
           if (isAdmin() && type.value !== st.type) {
             if (!confirm(`Switch this contest to ${TYPE_INFO[type.value].label}? Existing ${W.many} and scores are kept; the screens and wording change.`)) return;

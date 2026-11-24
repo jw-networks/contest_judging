@@ -32,6 +32,7 @@ export const DEFAULTS = {
       ['Accuracy / Interpretation', 'Faithfulness to source or strength of original design'],
       ['Stage Presence', 'Performance, posing, character embodiment'],
       ['Overall Impact', 'Wow factor and audience impression']],
+    quickNotes: ['Exceptional electronics', 'Extraordinary paint', 'Great weathering', 'Clean sewing', 'Amazing armor', 'Great wig / hair', 'Excellent makeup', 'Strong performance', 'Accurate to source', 'Creative interpretation'],
   },
   makers: {
     divisions: ['Props', 'Armor', 'Wearables', 'Other'],
@@ -40,6 +41,7 @@ export const DEFAULTS = {
       ['Creativity & Design', 'Originality, problem solving, design choices'],
       ['Finish & Detail', 'Paint, weathering, surface work, small details'],
       ['Presentation', 'Documentation, display, how the maker explains the work']],
+    quickNotes: ['Exceptional electronics', 'Extraordinary paint', 'Great weathering', 'Clean seams & finish', 'Clever engineering', 'Great documentation', 'Ambitious technique', 'Excellent sculpting', 'Strong 3D print finish', 'Durable build'],
   },
 };
 
@@ -158,6 +160,19 @@ export class Contest {
    * every record gets its contestId, and judge/coordinator accounts keep that role inside it.
    */
   migrate() {
+    const a = this.migrateSchema1();
+    // Contests made before quick notes existed get the default list for their type.
+    let b = false;
+    for (const c of Object.values(this.db.data.contests || {})) {
+      if (Array.isArray(c.quickNotes) || c.deleted) continue;
+      c.quickNotes = [...(DEFAULTS[c.type] || DEFAULTS.cosplay).quickNotes];
+      c.rev = this.bump(); this.dirty.add('c:contests'); b = true;
+    }
+    if (b) this.flags.rev = true;
+    return a || b;
+  }
+
+  migrateSchema1() {
     const db = this.db;
     if ((db.schema || 1) >= SCHEMA) return false;
     const now = Date.now();
@@ -169,7 +184,7 @@ export class Contest {
     db.data.contests[cid] = stamp({
       id: cid, name: ev.name || 'Cosplay Contest', type: 'cosplay',
       stageSeconds: ev.stageSeconds ?? 90, warnSeconds: ev.warnSeconds ?? 15,
-      divisions: ev.divisions || DEFAULTS.cosplay.divisions, scoresLocked: !!ev.scoresLocked, order: 1, updatedBy: 'system',
+      divisions: ev.divisions || DEFAULTS.cosplay.divisions, quickNotes: [...DEFAULTS.cosplay.quickNotes], scoresLocked: !!ev.scoresLocked, order: 1, updatedBy: 'system',
     });
     db.data.settings.event = stamp({ id: 'event', name: '', updatedBy: 'system' });
     for (const coll of ['criteria', 'participants', 'scores']) for (const r of Object.values(db.data[coll])) stamp(Object.assign(r, { contestId: cid }));
@@ -206,7 +221,7 @@ export class Contest {
     const d = DEFAULTS[type] || DEFAULTS.cosplay;
     const put = (coll, rec) => { db.data[coll][rec.id] = { ...rec, rev: this.bump(), updatedAt: now, updatedBy: by }; this.dirty.add('c:' + coll); };
     const order = Object.values(db.data.contests).length + 1;
-    put('contests', { id, name: str(name, 120) || 'New contest', type, stageSeconds: 90, warnSeconds: 15, divisions: d.divisions, scoresLocked: false, order, createdAt: now });
+    put('contests', { id, name: str(name, 120) || 'New contest', type, stageSeconds: 90, warnSeconds: 15, divisions: d.divisions, quickNotes: d.quickNotes, scoresLocked: false, order, createdAt: now });
     d.criteria.forEach(([cname, description], i) => put('criteria', { id: `${id}-c${i + 1}`, contestId: id, name: cname, description, max: 10, weight: 1, order: i + 1 }));
     put('stage', { id, contestId: id, participantId: null, nextParticipantId: null, state: 'idle', durationMs: 90000, startedAt: null, remainingMs: 90000 });
     return id;
@@ -287,7 +302,7 @@ export class Contest {
         return null;
       case 'scores':
         if (r === 'lead') return rec;
-        if (r === 'viewer') return strip(rec, 'comment', 'reason');
+        if (r === 'viewer') return strip(rec, 'comment', 'reason', 'tags');
         if (r === 'judge' && rec.judgeId === user.id) return strip(rec, 'reason');
         return null;
     }
@@ -309,6 +324,7 @@ export class Contest {
         if (has('stageSeconds')) p.stageSeconds = Math.round(num(patch.stageSeconds, 5, 3600, 90));
         if (has('warnSeconds')) p.warnSeconds = Math.round(num(patch.warnSeconds, 0, 600, 15));
         if (has('divisions') && Array.isArray(patch.divisions)) p.divisions = patch.divisions.map(x => str(x, 60)).filter(Boolean).slice(0, 30);
+        if (has('quickNotes') && Array.isArray(patch.quickNotes)) p.quickNotes = [...new Set(patch.quickNotes.map(x => str(String(x ?? '').trim(), 40)).filter(Boolean))].slice(0, 40);
         if (has('scoresLocked')) p.scoresLocked = !!patch.scoresLocked;
         if (has('order')) p.order = num(patch.order, -1e6, 1e6, 0);
         if (has('archived')) p.archived = !!patch.archived;
@@ -341,6 +357,7 @@ export class Contest {
           }
         }
         if (has('comment')) p.comment = str(patch.comment, 2000);
+        if (has('tags') && Array.isArray(patch.tags)) p.tags = [...new Set(patch.tags.map(x => str(String(x ?? '').trim(), 40)).filter(Boolean))].slice(0, 40);
         if (has('submitted')) p.submitted = !!patch.submitted;
         if (has('reason')) p.reason = str(patch.reason, 300);
         break;
@@ -439,7 +456,7 @@ export class Contest {
     // Audit trail
     const label = p => (p.title ? `#${p.number || '?'} ${p.title}` : `#${p.number || '?'} ${p.name || ''}`);
     if (coll === 'scores' && rec.judgeId !== user.id) {
-      this.audit(user, 'score.edit', { contestId: cid, target: id, participantId: rec.participantId, judgeId: rec.judgeId, reason: patch.reason, before: before && { values: before.values, comment: before.comment, submitted: before.submitted, deleted: before.deleted }, after: { values: rec.values, comment: rec.comment, submitted: rec.submitted, deleted: rec.deleted } });
+      this.audit(user, 'score.edit', { contestId: cid, target: id, participantId: rec.participantId, judgeId: rec.judgeId, reason: patch.reason, before: before && { values: before.values, comment: before.comment, tags: before.tags, submitted: before.submitted, deleted: before.deleted }, after: { values: rec.values, comment: rec.comment, tags: rec.tags, submitted: rec.submitted, deleted: rec.deleted } });
     } else if (coll === 'scores' && patch.submitted === true && !(before && before.submitted)) {
       this.audit(user, 'score.submit', { contestId: cid, target: id, participantId: rec.participantId, judgeId: rec.judgeId, after: { values: rec.values } });
     } else if (coll === 'participants' && patch.checkedIn !== undefined && (!before || !!before.checkedIn !== !!rec.checkedIn)) {
