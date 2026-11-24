@@ -90,6 +90,21 @@ All of this is enforced by the Worker. A device only ever receives the records i
 
 The **confidence monitor** needs no sign-in, so it can run on a screen facing the stage. It shows only the stage information for its contest.
 
+## Run it on your own network (no internet)
+
+Spotlight can also run entirely on a laptop or mini-PC at the venue. Every tablet, phone and laptop on the same Wi-Fi opens it in a browser and syncs through that computer: scores, check-in, photos, and the stage clock on the confidence monitors. No internet is needed. This is optional and separate from the online version.
+
+1. Install [Node.js](https://nodejs.org) (LTS, 22.13 or newer) on the server computer.
+2. Download **[spotlight-local-server.zip](https://github.com/jw-networks/contest_judging/releases/download/local-server/spotlight-local-server.zip)** (also linked from **Admin** in the app), and unzip it.
+3. Double-click **Start Spotlight (Windows).bat** or **Start Spotlight (Mac).command** (Linux: `./start-linux.sh`). Allow network access if asked.
+4. The window shows the address to open on every device (e.g. `http://192.168.1.20:8787`) and, the first time, the admin password.
+
+Data lives in `spotlight-data/` next to the start files: `spotlight.db` (live) and `backups/` (a full copy every 5 minutes and on shutdown, last 48 kept). To move it, stop the server and copy that folder. There's also a Dockerfile in the zip for mini-PCs and NAS boxes. Optional: set `DATA_REPO` and `DATA_REPO_TOKEN` to also copy the data to a private GitHub repo whenever the computer has internet (it uses `local-db.json`, so it never overwrites the cloud copy).
+
+From the repo: `npm run local` (same thing). The zip is rebuilt automatically by `.github/workflows/local-server.yml` on every push.
+
+**Network notes:** use a normal (not "guest") Wi-Fi so devices can see each other, and give the server a fixed address on the router if you can. The server only answers to its IP address, `localhost`, `.local`/`.lan` names, the computer's own name, or names you add with `SPOTLIGHT_HOSTS`, and only to pages it served itself. Over plain http, browsers don't keep an offline copy of the app shell, so keep the app open on each tablet; scores are saved on the tablet either way. Put `cert.pem` and `key.pem` in `spotlight-data/` to serve https instead.
+
 ## Heats and finals
 
 In **Setup → Contest**, set **Heats** (0 = no heats) and **Finalists from all heats combined** (default 3).

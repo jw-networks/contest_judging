@@ -527,7 +527,7 @@ export class Contest {
       return { number: p.number, name: p.name, character: p.character, series: p.series, division: p.division };
     };
     return {
-      contestId: cid, contestName: c.name, eventName: ev.name || '', type: c.type, warnSeconds: c.warnSeconds,
+      contestId: cid, contestName: c.name, eventName: ev.name || '', contestType: c.type, warnSeconds: c.warnSeconds,
       state: s.state, durationMs: s.durationMs, startedAt: s.startedAt, remainingMs: s.remainingMs, seq: s.seq || 0,
       current: pick(s.participantId), next: pick(s.nextParticipantId), serverTime: Date.now(),
       roundLabel: c.heats > 0 && s.round ? (s.round === 'final' ? 'Finals' : `Heat ${s.round}`) : '',

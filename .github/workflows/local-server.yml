@@ -1,0 +1,49 @@
+# Builds the downloadable local network server (spotlight-local-server.zip) and attaches it to the
+# "local-server" release, so the app's Admin page can link to a stable download address:
+#   https://github.com/<owner>/<repo>/releases/download/local-server/spotlight-local-server.zip
+name: Build local server download
+
+on:
+  push:
+    branches: [main]
+    paths: ['public/**', 'worker/src/**', 'worker/package.json', 'local/**', 'package.json', '.github/workflows/local-server.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: local-server
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Smoke test (start the server, sign in, stop)
+        run: |
+          mkdir -p /tmp/sl && ADMIN_PASSWORD=smoke-test-pw DATA_DIR=/tmp/sl PORT=8799 node local/server.mjs > /tmp/sl/log.txt 2>&1 &
+          PID=$!
+          for i in $(seq 1 20); do curl -fs http://127.0.0.1:8799/local-info >/dev/null && break; sleep 0.5; done
+          curl -fs -X POST http://127.0.0.1:8799/api/login -H 'Content-Type: application/json' -d '{"username":"admin","password":"smoke-test-pw"}' | grep -q token
+          kill $PID; sleep 1; ls /tmp/sl/backups | grep -q shutdown
+          cat /tmp/sl/log.txt
+      - name: Build zip
+        run: python3 local/build-zip.py
+      - name: Publish to the local-server release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="Download **spotlight-local-server.zip**, unzip it, and double-click the Start file for your computer. See README.txt inside.
+
+          Built from ${GITHUB_SHA::7} on $(date -u '+%Y-%m-%d %H:%M UTC'). This release is updated automatically."
+          if ! gh release view local-server >/dev/null 2>&1; then
+            gh release create local-server --title "Spotlight local server" --notes "$notes" --latest=false
+          else
+            gh release edit local-server --notes "$notes"
+          fi
+          gh release upload local-server dist/spotlight-local-server.zip --clobber

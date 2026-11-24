@@ -8,12 +8,12 @@
  * Data lives in dev/.data/ (storage.json = Cloudflare storage, github/db.json = the "GitHub" mirror).
  * Not for production: production is GitHub Pages + the Cloudflare Worker.
  */
-import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import worker, { ContestDB } from '../worker/src/index.js';
+import { durableContext, serve } from '../local/runtime.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PUBLIC = path.join(ROOT, 'public');
@@ -28,27 +28,14 @@ const storeFile = path.join(DATA, 'storage.json');
 const revive = (k, v) => (v && typeof v === 'object' && typeof v.__u8 === 'string' ? new Uint8Array(Buffer.from(v.__u8, 'base64')) : v);
 const replace = (k, v) => (v instanceof Uint8Array ? { __u8: Buffer.from(v).toString('base64') } : v);
 const mem = new Map(fs.existsSync(storeFile) ? Object.entries(JSON.parse(fs.readFileSync(storeFile, 'utf8'), revive)) : []);
-let alarmTimer = null, alarmAt = null;
 const persist = () => fs.writeFileSync(storeFile, JSON.stringify(Object.fromEntries(mem), replace));
-const clone = v => (v === undefined ? undefined : structuredClone(v));
-const sockets = new Set();
-let chain = Promise.resolve();
-const ctx = {
-  storage: {
-    async get(k) { return Array.isArray(k) ? new Map(k.filter(x => mem.has(x)).map(x => [x, clone(mem.get(x))])) : clone(mem.get(k)); },
-    async put(k, v) { if (typeof k === 'string') mem.set(k, clone(v)); else for (const [a, b] of Object.entries(k)) mem.set(a, clone(b)); persist(); },
-    async delete(k) { (Array.isArray(k) ? k : [k]).forEach(x => mem.delete(x)); persist(); },
-    async getAlarm() { return alarmAt; },
-    async setAlarm(t) {
-      clearTimeout(alarmTimer); alarmAt = t;
-      alarmTimer = setTimeout(() => { alarmAt = null; dobj.alarm().catch(e => console.error('alarm', e)); }, Math.max(0, t - Date.now()));
-    },
-  },
-  blockConcurrencyWhile(fn) { const p = chain.then(fn); chain = p.catch(() => {}); return p; },
-  getWebSockets() { return [...sockets]; },
-  acceptWebSocket() { throw new Error('handled by dev server'); },
-  setWebSocketAutoResponse() { },
-};
+const { ctx, sockets, holder } = durableContext({
+  get: k => mem.get(k),
+  set: (k, v) => { mem.set(k, v); persist(); },
+  setMany: list => { list.forEach(([k, v]) => mem.set(k, v)); persist(); },
+  delete: k => { mem.delete(k); persist(); },
+  deleteMany: keys => { keys.forEach(k => mem.delete(k)); persist(); },
+});
 
 // ---------- fake GitHub contents API backed by dev/.data/github/
 const ghFile = path.join(DATA, 'github', 'db.json');
@@ -84,64 +71,15 @@ const env = {
   FETCH: fakeGitHub,
 };
 const dobj = new ContestDB(ctx, env);
+holder.dobj = dobj;
 env.CONTEST = { idFromName: () => 'main', get: () => dobj };
 
-// ---------- minimal WebSocket server (text frames, ping/pong, close)
-function wsAccept(req, socket) {
-  const key = req.headers['sec-websocket-key'];
-  const origin = req.headers.origin;
-  if (!key || (origin && !env.ALLOWED_ORIGINS.split(',').includes(origin))) { socket.destroy(); return; }
-  const accept = crypto.createHash('sha1').update(key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').digest('base64');
-  socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
-  const frame = (op, data) => {
-    const p = Buffer.from(data);
-    const head = p.length < 126 ? Buffer.from([0x80 | op, p.length]) : p.length < 65536 ? Buffer.from([0x80 | op, 126, p.length >> 8, p.length & 255]) : Buffer.concat([Buffer.from([0x80 | op, 127]), (() => { const b = Buffer.alloc(8); b.writeBigUInt64BE(BigInt(p.length)); return b; })()]);
-    return Buffer.concat([head, p]);
-  };
-  const ws = { send: msg => { if (!socket.destroyed) socket.write(frame(1, msg)); }, close: () => socket.end(frame(8, '')) };
-  sockets.add(ws);
-  let buf = Buffer.alloc(0);
-  socket.on('data', d => {
-    buf = Buffer.concat([buf, d]);
-    while (buf.length >= 2) {
-      const op = buf[0] & 15; let len = buf[1] & 127, off = 2;
-      if (len === 126) { len = buf.readUInt16BE(2); off = 4; } else if (len === 127) { len = Number(buf.readBigUInt64BE(2)); off = 10; }
-      const masked = buf[1] & 128; const mask = masked ? buf.subarray(off, off + 4) : null; if (masked) off += 4;
-      if (buf.length < off + len) return;
-      const payload = Buffer.from(buf.subarray(off, off + len)); if (mask) for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4];
-      buf = buf.subarray(off + len);
-      if (op === 8) { sockets.delete(ws); socket.end(frame(8, '')); return; }
-      if (op === 1 && payload.toString() === 'ping') ws.send('pong');
-      if (op === 9) socket.write(frame(10, payload));
-    }
-  });
-  const gone = () => sockets.delete(ws);
-  socket.on('close', gone); socket.on('error', gone);
-  ws.send(JSON.stringify({ type: 'rev', rev: dobj.contest.rev }));
-  if (dobj.contest.db) for (const cid of Object.keys(dobj.contest.db.data.contests)) {
-    const st = dobj.contest.stagePublic(cid);
-    if (st && st.type === 'cosplay') ws.send(JSON.stringify({ type: 'stage', ...st }));
-  }
-}
-
-// ---------- http
-const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css', '.json': 'application/json', '.webmanifest': 'application/manifest+json', '.svg': 'image/svg+xml', '.png': 'image/png' };
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, ORIGIN);
-  if (url.pathname === '/__dev/github-log') { res.writeHead(200, { 'Content-Type': 'application/json' }); return res.end(JSON.stringify(ghLog)); }
-  if (url.pathname.startsWith('/api/')) {
-    const chunks = []; for await (const c of req) chunks.push(c);
-    const headers = new Headers(); for (const [k, v] of Object.entries(req.headers)) if (typeof v === 'string') headers.set(k, v);
-    headers.set('CF-Connecting-IP', req.socket.remoteAddress || '');
-    const r = await worker.fetch(new Request(ORIGIN + req.url, { method: req.method, headers, body: ['GET', 'HEAD'].includes(req.method) ? undefined : Buffer.concat(chunks) }), env);
-    res.writeHead(r.status, Object.fromEntries(r.headers));
-    return res.end(Buffer.from(await r.arrayBuffer()));
-  }
-  let rel = decodeURIComponent(url.pathname); if (rel === '/' || !path.extname(rel)) rel = '/index.html';
-  const file = path.resolve(PUBLIC, '.' + rel);
-  if (!file.startsWith(PUBLIC + path.sep) || !fs.existsSync(file)) { res.writeHead(404); return res.end('Not found'); }
-  res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
-  res.end(fs.readFileSync(file));
+// ---------- http + WebSocket (shared with the local network server)
+const allowed = () => env.ALLOWED_ORIGINS.split(',');
+serve({
+  worker, dobj, sockets, publicDir: PUBLIC, port: PORT,
+  envFor: () => env,
+  originOK: origin => !origin || allowed().includes(origin),
+  routes: { '/__dev/github-log': (req, res) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(ghLog)); } },
+  onListen: () => console.log(`Dev server on ${ORIGIN}  (data in ${DATA})`),
 });
-server.on('upgrade', (req, socket) => { if (new URL(req.url, ORIGIN).pathname === '/api/ws') wsAccept(req, socket); else socket.destroy(); });
-server.listen(PORT, () => console.log(`Dev server on ${ORIGIN}  (data in ${DATA})`));

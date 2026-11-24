@@ -5,7 +5,10 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node dev/server.mjs"
+    "dev": "node dev/server.mjs",
+    "local": "node local/server.mjs"
   },
-  "engines": { "node": ">=18" }
+  "engines": {
+    "node": ">=18"
+  }
 }

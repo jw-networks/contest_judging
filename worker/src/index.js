@@ -169,7 +169,7 @@ export class ContestDB {
       pair[1].send(JSON.stringify({ type: 'rev', rev: this.contest.rev }));
       for (const cid of Object.keys(this.contest.db.data.contests)) {
         const st = this.contest.stagePublic(cid);
-        if (st && st.type === 'cosplay') pair[1].send(JSON.stringify({ type: 'stage', ...st }));
+        if (st && st.contestType === 'cosplay') pair[1].send(JSON.stringify({ type: 'stage', ...st }));
       }
       return new Response(null, { status: 101, webSocket: pair[0] });
     }
@@ -226,7 +226,7 @@ export class ContestDB {
   async githubAdmin(req) {
     try {
       const admin = await this.contest.requireUser(req, 'admin');
-      const status = async () => ({ ...((await this.ctx.storage.get('gh')) || {}), rev: this.contest.rev, repo: this.gh.repo, path: this.gh.path, branch: this.gh.branch, configured: this.gh.configured, flushSeconds: this.flushMs / 1000 });
+      const status = async () => ({ ...((await this.ctx.storage.get('gh')) || {}), rev: this.contest.rev, repo: this.gh.repo, path: this.gh.path, branch: this.gh.branch, configured: this.gh.configured, flushSeconds: this.flushMs / 1000, local: !!this.env.LOCAL_MODE });
       if (req.method === 'GET') return json(200, await status());
       if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed');
       const body = await req.json().catch(() => ({}));

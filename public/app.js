@@ -1027,7 +1027,7 @@ if (bc) bc.onmessage = e => monitorFeed(e.data, 'local');
 function stagePublicLocal() {
   const s = stage(); const c = settings();
   const pick = id => { const p = S.data.participants[id]; return p && !p.deleted ? { number: p.number, name: p.name, character: p.character, series: p.series, division: p.division } : null; };
-  return { contestId: curId(), contestName: c.name, eventName: eventName(), type: c.type, warnSeconds: c.warnSeconds, state: s.state, durationMs: s.durationMs, startedAt: s.startedAt, remainingMs: s.remainingMs, seq: s.seq || 0, current: pick(s.participantId), next: pick(s.nextParticipantId), serverTime: serverNow(), roundLabel: heatsOn() && s.round ? heatLabel(s.round) : '' };
+  return { contestId: curId(), contestName: c.name, eventName: eventName(), contestType: c.type, warnSeconds: c.warnSeconds, state: s.state, durationMs: s.durationMs, startedAt: s.startedAt, remainingMs: s.remainingMs, seq: s.seq || 0, current: pick(s.participantId), next: pick(s.nextParticipantId), serverTime: serverNow(), roundLabel: heatsOn() && s.round ? heatLabel(s.round) : '' };
 }
 function broadcastStageLocal() { if (bc && curId()) bc.postMessage(stagePublicLocal()); }
 
@@ -1047,7 +1047,7 @@ function renderMonitor(app) {
   stopTicker();
   cancelAnimationFrame(mon.raf);
   mon.cid = route().args[0] || null;
-  const known = Object.values(mon.byId).map(x => x.data).filter(d => d.type !== 'makers');
+  const known = Object.values(mon.byId).map(x => x.data).filter(d => (d.contestType || d.type) !== 'makers');
   if (!mon.cid && known.length === 1) mon.cid = known[0].contestId;
   if (!mon.cid) {
     // No contest in the address: let the operator pick one.
@@ -1970,12 +1970,42 @@ function accessPanel(cid, online) {
     admins.length ? h('p.small.muted', `Admins always have full access: ${admins.map(u => u.displayName).join(', ')}.`) : null);
 }
 
+const LOCAL_ZIP = 'https://github.com/jw-networks/contest_judging/releases/download/local-server/spotlight-local-server.zip';
+
+// Running on the local network server (local/server.mjs): where the data lives and the addresses to use.
+function localServerPanel(st) {
+  const addrs = h('div.stack', h('p.small.muted', 'Looking up this server\'s addresses…'));
+  fetch(serverBase() + '/local-info', { cache: 'no-store' }).then(r => r.json()).then(info => addrs.replaceChildren(
+    h('p.small.muted', 'Open one of these on every tablet, phone and laptop. They must be on the same Wi-Fi or network as the server computer.'),
+    ...(info.addresses?.length ? info.addresses : [location.origin]).map(a => h('div.local-addr', h('code', a), h('button.btn.sm.ghost', { onclick: () => { navigator.clipboard?.writeText(a).then(() => toast('Copied', 'ok'), () => {}); } }, 'Copy')))))
+    .catch(() => addrs.replaceChildren(h('p.small.muted', `Devices connect to ${location.origin}`)));
+  return h('div.panel.stack', h('h3', 'Local server'),
+    h('div.banner.info', h('span.tag', 'Local'), h('span.grow', 'Spotlight is running on a computer on your own network. No internet is needed: every device syncs through that computer.')),
+    addrs,
+    h('p.small.muted', 'Data is saved on the server computer in its spotlight-data folder, with an automatic backup every few minutes in spotlight-data/backups. Keep the server window open during the event.'),
+    st && st.configured ? h('p.small.muted', 'It is also copied to ', h('b', `${st.repo}/${st.path}`), ' on GitHub whenever that computer has internet.') : null,
+    !location.protocol.startsWith('https') ? h('p.small.muted', 'Over plain http, browsers don\'t keep an offline copy of the app itself, so keep the app open on each tablet rather than closing it while the server is unreachable. Scores are always saved on the tablet either way.') : null);
+}
+
+// Shown on the cloud version: how to run the same thing on a private network.
+function localDownloadPanel() {
+  return h('div.panel.stack', h('h3', 'Run on your own network (optional)'),
+    h('p.small.muted', 'For venues with no reliable internet: run Spotlight on a laptop or mini-PC at the event. Every device on the same Wi-Fi syncs through it, including the stage clock and confidence monitor. It is a separate copy: contests, accounts and scores here are not moved over automatically.'),
+    h('ol.small.muted.steps',
+      h('li', 'Install Node.js (the free LTS version) from nodejs.org on that computer.'),
+      h('li', 'Download the local server, unzip it, and double-click the Start file for your system.'),
+      h('li', 'Open the address it shows on every device, sign in as admin with the password it shows, and set up your contests.')),
+    h('div', h('a.btn.primary', { href: LOCAL_ZIP, rel: 'noopener' }, 'Download local server (.zip)')));
+}
+
 function githubPanel(online) {
   const body = h('div.stack', h('p.muted.small', online ? 'Checking…' : 'Connect to see the status of the GitHub copy.'));
   const call = (method, payload) => api('/api/admin/github', payload, { method, token: S.account.token });
   const draw = st => {
     const pending = st.lastPushRev == null || st.lastPushRev !== st.rev;
+    if (st.local && !st.configured) return body.replaceChildren(localServerPanel(st));
     body.replaceChildren(...[
+      st.local ? localServerPanel(st) : null,
       h('p.small.muted', 'The live data is kept by the server and copied to the private GitHub repo ', h('b', `${st.repo}/${st.path}`), ` within about ${st.flushSeconds} seconds of any change.`),
       !st.configured ? h('div.banner.bad', 'The server has no GitHub token or data repo configured, so nothing is being copied to GitHub.') : null,
       h('div.tiles',
@@ -1994,7 +2024,8 @@ function githubPanel(online) {
         }, 'Restore from GitHub…'))].filter(Boolean));
   };
   if (online) call('GET').then(draw).catch(e => body.replaceChildren(h('p.small', { style: { color: 'var(--bad)' } }, e.message)));
-  return h('div.panel.stack', h('h3', 'GitHub data copy'), body);
+  else if (CFG.local) body.replaceChildren(localServerPanel(null));
+  return CFG.local ? body : h('div.panel.stack', h('h3', 'GitHub data copy'), body);
 }
 
 // ============================================================ admin (account-wide)
@@ -2010,6 +2041,7 @@ function viewAdmin() {
       h('p.small.muted', 'Each account gets a role per contest, or is an admin who sees and manages everything. New accounts and password resets must choose their own password at first sign-in.'),
       accountsPanel(online)),
     githubPanel(online),
+    CFG.local ? null : localDownloadPanel(),
     h('div.panel.stack', h('h3', 'Backup'),
       h('div', h('button.btn', {
         disabled: !online,
