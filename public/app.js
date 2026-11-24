@@ -182,12 +182,50 @@ const WORDS = () => isMakers()
   ? { one: 'entry', many: 'entries', One: 'Entry', Many: 'Entries', division: 'Category', divisions: 'Categories' }
   : { one: 'contestant', many: 'contestants', One: 'Contestant', Many: 'Contestants', division: 'Division', divisions: 'Divisions' };
 const partLabel = p => !p ? 'Unknown entry' : p.title ? `#${p.number || '?'} ${p.title}` : `#${p.number || '?'} ${p.name || '(no name)'}`;
-const partSub = p => !p ? '' : p.title
-  ? [p.name ? 'by ' + p.name : '', p.division, p.materials].filter(Boolean).join(' · ')
-  : [p.character, p.series, p.division].filter(Boolean).join(' · ');
+const partSub = p => !p ? '' : (p.title
+  ? [p.name ? 'by ' + p.name : '', p.division, p.materials]
+  : [p.character, p.series, p.division]).concat(heatsOn() && p.heat ? [heatLabel(p.heat)] : []).filter(Boolean).join(' · ');
 function runOrder() {
   const key = p => p.order ?? (parseFloat(p.number) || 1e9);
   return participants().filter(p => p.checkedIn || p.status === 'on_stage' || p.status === 'done').sort((a, b) => key(a) - key(b) || byNum(a, b));
+}
+
+// ---------- heats & finals
+// A contest can have N heats (contest.heats). Every entry sits in one heat (participant.heat). Heat scores
+// are the normal score sheets; the top `contest.finalists` across all heats combined are marked finalist and
+// scored again in Finals (score id participant__judge__final). Rounds: 1..N, 'none' (no heat set), 'final'.
+const heatsOn = () => (settings().heats || 0) > 0;
+const heatLabel = r => r === 'final' ? 'Finals' : r === 'none' ? 'No heat' : `Heat ${r}`;
+const inHeat = (p, r) => r === 'none' ? !(p.heat >= 1 && p.heat <= settings().heats) : p.heat === r;
+function roundList(round, base = runOrder()) {
+  if (!heatsOn() || round == null) return base;
+  if (round === 'final') return base.filter(p => p.finalist).sort((a, b) => (a.finalOrder ?? 1e9) - (b.finalOrder ?? 1e9) || byNum(a, b));
+  return base.filter(p => inHeat(p, round));
+}
+function roundOptions(base = participants()) {
+  const r = [];
+  for (let i = 1; i <= (settings().heats || 0); i++) r.push(i);
+  if (base.some(p => inHeat(p, 'none'))) r.push('none');
+  r.push('final');
+  return r;
+}
+const validRound = (r, opts = roundOptions()) => opts.includes(r) ? r : opts[0];
+const stageRound = () => heatsOn() ? validRound(stage().round ?? 1) : null;
+const judgeRound = () => heatsOn() ? validRound(ui.judgeRound ?? stageRound()) : null;
+const scoreRound = () => judgeRound() === 'final' ? 'final' : null;
+const roundOf = s => s.round === 'final' ? 'final' : null;
+// Round picker chips. counts: optional fn(round) -> small number shown on the chip.
+function roundPicker(cur, onPick, { counts, finalsReady = participants().some(p => p.finalist) } = {}) {
+  return h('div.round-pick', { role: 'tablist' }, roundOptions().map(r => h('button', {
+    type: 'button', role: 'tab', class: r === cur ? 'on' : '', 'aria-selected': r === cur ? 'true' : 'false',
+    disabled: r === 'final' && !finalsReady, title: r === 'final' && !finalsReady ? 'Finalists have not been chosen yet' : '',
+    onclick: () => onPick(r),
+  }, heatLabel(r), counts ? h('span.n', counts(r)) : null)));
+}
+function nextFreeHeat() {
+  const n = settings().heats || 0; if (!n) return null;
+  const c = Array.from({ length: n }, (_, i) => participants().filter(p => p.heat === i + 1 && p.status !== 'no_show').length);
+  return c.indexOf(Math.min(...c)) + 1;
 }
 
 // ---------- persistence
@@ -775,6 +813,7 @@ function editParticipant(p) {
     h('div.form-grid',
       PART_FIELDS[type].map(([k, label, ph]) => field(k, label, inp(k, ph))),
       field('division', W.division, h('select', h('option', { value: '' }, '—'), (st.divisions || []).map(d => h('option', { value: d, selected: p.division === d }, d)))),
+      heatsOn() ? field('heat', 'Heat', h('select', h('option', { value: '' }, '—'), Array.from({ length: st.heats }, (_, i) => h('option', { value: i + 1, selected: (isNew ? nextFreeHeat() : p.heat) === i + 1 }, heatLabel(i + 1))))) : null,
       isNew ? null : field('status', 'Status', status)),
     field('judgeNotes', isMakers() ? 'Notes shown to judges (build log, techniques, references)' : 'Notes shown to judges (build notes, references)', ta('judgeNotes')),
     field('notes', isMakers() ? 'Private staff notes (table number, fragile, pickup time…) — not shown to judges' : 'Private staff notes (accessibility, special needs…) — not shown to judges', ta('notes')),
@@ -795,6 +834,7 @@ function editParticipant(p) {
           const v = f[k].value.trim();
           if (isNew || v !== (p[k] || '')) patch[k] = v;
         }
+        if (f.heat) { const hv = f.heat.value ? Number(f.heat.value) : null; if (isNew || hv !== (p.heat ?? null)) patch.heat = hv; }
         if (isNew && !(isMakers() ? patch.title || patch.name : patch.name)) { toast(isMakers() ? 'Please enter an entry title or maker' : 'Please enter a name', 'bad'); return; }
         if (isNew) { patch.contestId = curId(); patch.checkedIn = checkIn.checked; patch.status = checkIn.checked ? 'checked_in' : 'registered'; }
         else if (f.status.value !== (p.status || 'registered')) {
@@ -818,8 +858,8 @@ function remainingOf(s, now = serverNow()) {
 }
 function stageSet(patch) { mutate('stage', curId(), { ...patch, contestId: curId(), seq: serverNow() }); }
 function nextAfter(pid) {
-  const order = runOrder().filter(p => p.status === 'checked_in' && p.id !== pid);
-  const all = runOrder();
+  const all = roundList(stageRound());
+  const order = all.filter(p => p.status === 'checked_in' && p.id !== pid);
   const idx = all.findIndex(p => p.id === pid);
   return (all.slice(idx + 1).find(p => p.status === 'checked_in') || order[0] || null)?.id || null;
 }
@@ -882,12 +922,19 @@ function viewStage() {
   };
   tick(); ticker = setInterval(tick, 200);
 
-  const order = runOrder();
+  const round = stageRound();
+  const order = roundList(round);
   const B = (label, fn, cls = '', dis = false) => h('button.btn.big', { class: cls, onclick: fn, disabled: dis }, label);
   const running = s.state === 'running';
+  const pickRound = r => {
+    if (r === round) return;
+    const first = roundList(r).find(p => p.status === 'checked_in');
+    stageSet({ round: r, nextParticipantId: first?.id || null });
+  };
   return h('div.grid.cols-stage',
-    h('div.panel', h('h3', 'Running order'),
-      h('p.small.muted', 'Checked-in contestants. Tap a name to put them on stage.'),
+    h('div.panel', h('h3', heatsOn() ? `Running order · ${heatLabel(round)}` : 'Running order'),
+      heatsOn() ? roundPicker(round, pickRound, { counts: r => roundList(r).length }) : null,
+      h('p.small.muted', heatsOn() ? 'Pick the round you are running. Tap a name to put them on stage.' : 'Checked-in contestants. Tap a name to put them on stage.'),
       h('div.list', order.length ? order.map((p, i) => h('div.item', { class: (p.id === s.participantId ? 'sel ' : '') + (p.status === 'done' ? 'dim' : '') },
         h('div.num', p.number || '–'),
         h('div.who', { onclick: () => { if (p.id !== s.participantId) putOnStage(p.id); } }, h('div.n', p.name),
@@ -896,7 +943,7 @@ function viewStage() {
           h('button.btn.sm.ghost', { title: 'Set as next', onclick: () => stageSet({ nextParticipantId: p.id }) }, '⏭'),
           h('button.btn.sm.ghost', { title: 'Move up', disabled: i === 0, onclick: () => reorder(order, i, -1) }, '↑'),
           h('button.btn.sm.ghost', { title: 'Move down', disabled: i === order.length - 1, onclick: () => reorder(order, i, 1) }, '↓'))))
-        : h('p.muted', 'Nobody checked in yet.'))),
+        : h('p.muted', heatsOn() && round === 'final' ? 'No finalists yet. The contest lead confirms them on the Results page.' : 'Nobody checked in yet.'))),
     h('div.stack',
       h('div.panel.stack',
         h('div.row.between', h('div', h('span.kicker', 'On stage'), h('h2', { style: { margin: 0 } }, cur ? partLabel(cur) : '—'),
@@ -933,7 +980,7 @@ if (bc) bc.onmessage = e => monitorFeed(e.data, 'local');
 function stagePublicLocal() {
   const s = stage(); const c = settings();
   const pick = id => { const p = S.data.participants[id]; return p && !p.deleted ? { number: p.number, name: p.name, character: p.character, series: p.series, division: p.division } : null; };
-  return { contestId: curId(), contestName: c.name, eventName: eventName(), type: c.type, warnSeconds: c.warnSeconds, state: s.state, durationMs: s.durationMs, startedAt: s.startedAt, remainingMs: s.remainingMs, seq: s.seq || 0, current: pick(s.participantId), next: pick(s.nextParticipantId), serverTime: serverNow() };
+  return { contestId: curId(), contestName: c.name, eventName: eventName(), type: c.type, warnSeconds: c.warnSeconds, state: s.state, durationMs: s.durationMs, startedAt: s.startedAt, remainingMs: s.remainingMs, seq: s.seq || 0, current: pick(s.participantId), next: pick(s.nextParticipantId), serverTime: serverNow(), roundLabel: heatsOn() && s.round ? heatLabel(s.round) : '' };
 }
 function broadcastStageLocal() { if (bc && curId()) bc.postMessage(stagePublicLocal()); }
 
@@ -1005,7 +1052,7 @@ function renderMonitor(app) {
 function drawMonitorStatic() {
   const el = mon.el; if (!el) return;
   const d = mon.byId[mon.cid]?.data || {};
-  $('.top .ev', el).textContent = [d.eventName, d.contestName].filter(Boolean).join(' · ');
+  $('.top .ev', el).textContent = [d.eventName, d.contestName, d.roundLabel].filter(Boolean).join(' · ');
   $('.top .conn', el).textContent = mon.connected ? '' : (bc ? '● local only' : '● no connection');
   const c = d.current;
   $('.who .num', el).textContent = c ? '#' + (c.number || '') : '';
@@ -1026,7 +1073,7 @@ function viewShow(kind) {
   const s = stage();
   const cur = S.data.participants[s.participantId];
   const nxt = S.data.participants[s.nextParticipantId];
-  const order = runOrder().filter(p => p.status !== 'no_show');
+  const order = roundList(stageRound()).filter(p => p.status !== 'no_show');
   const upcoming = order.filter(p => p.status !== 'done' && p.id !== s.participantId);
   const offline = S.net === 'offline' || S.net === 'auth';
   const fld = (label, val, cls = '') => h('div.show-field', { class: cls }, h('span.kicker', label), h('div.v', val || h('span.muted', '—')));
@@ -1190,7 +1237,7 @@ function photoEditor(p) {
 }
 
 // ============================================================ judge scoring
-function scoreId(pid, jid = S.account.user.id) { return pid + '__' + jid; }
+function scoreId(pid, jid = S.account.user.id, round = scoreRound()) { return pid + '__' + jid + (round === 'final' ? '__final' : ''); }
 function scoreTotal(sc, crits = criteria()) {
   let t = 0, filled = 0;
   for (const c of crits) { const v = sc?.values?.[c.id]; if (v != null) { t += v * (c.weight ?? 1); filled++; } }
@@ -1207,7 +1254,7 @@ function myRanking(list, crits = criteria()) {
     if (!sc || sc.deleted) continue;
     const t = scoreTotal(sc, crits);
     if (!t.filled) continue;
-    const d = p.division || '';
+    const d = heatsOn() ? heatLabel(judgeRound()) : (p.division || '');
     if (!groups.has(d)) groups.set(d, []);
     groups.get(d).push({ p, total: t.total });
   }
@@ -1237,8 +1284,8 @@ function judgeItem(p, { crits, stg, offline, rankInfo, inRanking }) {
 function judgeRankingList(list, ctx) {
   const ranks = myRanking(list, ctx.crits);
   if (!ranks.size) return h('p.muted', `Your ranking fills in as you score. It only uses your own scores, and only you can see it.`);
-  const divs = [...new Set(list.map(p => p.division || ''))];
-  const order = (st => [...st.divisions || [], ...divs.filter(d => !(st.divisions || []).includes(d))])(settings());
+  const divs = heatsOn() ? [heatLabel(judgeRound())] : [...new Set(list.map(p => p.division || ''))];
+  const order = heatsOn() ? divs : (st => [...st.divisions || [], ...divs.filter(d => !(st.divisions || []).includes(d))])(settings());
   const many = new Set([...ranks.values()].map(r => r.division)).size > 1;
   const unscored = list.filter(p => !ranks.has(p.id));
   return h('div',
@@ -1253,10 +1300,11 @@ function judgeRankingList(list, ctx) {
 function viewJudge() {
   const st = settings();
   const crits = criteria();
-  const list = runOrder().filter(p => p.status !== 'no_show');
+  const round = judgeRound();
+  const list = roundList(round, runOrder().filter(p => p.status !== 'no_show'));
   const stg = stage();
   const onStage = list.find(p => p.id === stg.participantId);
-  if (!ui.judgeSel || !S.data.participants[ui.judgeSel] || S.data.participants[ui.judgeSel].hidden) {
+  if (!ui.judgeSel || !S.data.participants[ui.judgeSel] || S.data.participants[ui.judgeSel].hidden || !list.some(p => p.id === ui.judgeSel)) {
     ui.judgeSel = onStage?.id || list.find(p => !S.data.scores[scoreId(p.id)]?.submitted)?.id || list[0]?.id || null;
   }
   const scored = list.filter(p => S.data.scores[scoreId(p.id)]?.submitted && !S.data.scores[scoreId(p.id)]?.deleted).length;
@@ -1269,14 +1317,17 @@ function viewJudge() {
     offline ? h('div.banner.warn', h('span.tag', 'Offline'), h('span.grow', S.net === 'auth'
       ? 'Sign in again to send your scores. They are saved on this tablet.'
       : (isMakers() ? 'Use Next to move between entries.' : 'Follow the stage and use Next.') + ' Your scores are saved on this tablet and send automatically when you reconnect.')) : null,
+    !offline && heatsOn() && stageRound() !== round && stg.participantId ? h('div.banner.stage', h('span.tag', 'Stage'), h('div.grow', `The stage is now running ${heatLabel(stageRound())}.`),
+      h('button.btn.primary', { onclick: () => { ui.judgeRound = stageRound(); ui.judgeSel = null; render(); } }, `Go to ${heatLabel(stageRound())}`)) : null,
     !offline && !isMakers() && onStage && onStage.id !== ui.judgeSel ? h('div.banner.stage', h('span.tag', 'On stage'), h('div.grow', h('b', partLabel(onStage)), onStage.character ? ` — ${onStage.character}` : ''),
       h('button.btn.primary', { onclick: () => goJudge(onStage.id) }, 'Score now')) : null,
     h('div.grid.cols-2',
-      h('div.panel', h('div.row.between', h('h3', WORDS().Many), h('span.muted.small', `${scored}/${list.length} submitted`)),
+      h('div.panel', h('div.row.between', h('h3', heatsOn() ? heatLabel(round) : WORDS().Many), h('span.muted.small', `${scored}/${list.length} submitted`)),
+        heatsOn() ? roundPicker(round, r => { ui.judgeRound = r; ui.judgeSel = null; render(); }, { counts: r => roundList(r, runOrder().filter(p => p.status !== 'no_show')).length }) : null,
         list.length ? h('div.seg.judge-tabs', { role: 'tablist' },
           [['order', isMakers() ? 'Entry order' : 'Running order'], ['rank', 'My ranking']].map(([k, label]) =>
             h('button', { type: 'button', role: 'tab', class: (ui.judgeTab || 'order') === k ? 'on' : '', 'aria-selected': (ui.judgeTab || 'order') === k ? 'true' : 'false', onclick: () => { ui.judgeTab = k; render(); } }, label))) : null,
-        !list.length ? h('p.muted', `${WORDS().Many} appear here once they are checked in.`)
+        !list.length ? h('p.muted', heatsOn() ? (round === 'final' ? 'Finalists appear here once the contest lead confirms them.' : `Nobody checked in for ${heatLabel(round)} yet.`) : `${WORDS().Many} appear here once they are checked in.`)
           : ui.judgeTab === 'rank' ? judgeRankingList(list, { crits, stg, offline })
           : h('div.list', list.map(p => judgeItem(p, { crits, stg, offline })))),
       sel ? scoreForm(sel, crits, locked, list) : h('div.panel.muted', `Pick ${isMakers() ? 'an entry' : 'a contestant'} to score.`)));
@@ -1309,7 +1360,7 @@ function scoreForm(p, crits, locked, list) {
   const sc = S.data.scores[id];
   const live = sc && !sc.deleted ? sc : null;
   const { total, complete } = scoreTotal(live, crits);
-  const set = patch => mutate('scores', id, { ...patch, ...(sc?.deleted ? { deleted: false } : {}) });
+  const set = patch => mutate('scores', id, { ...patch, ...(sc?.deleted ? { deleted: false } : {}), ...(scoreRound() === 'final' ? { round: 'final', participantId: p.id, judgeId: S.account.user.id } : {}) });
   const comment = h('textarea', { rows: 3, placeholder: 'Private notes / feedback (optional)', disabled: locked, oninput: debounce(e => set({ comment: e.target.value }), 400) }, live?.comment || '');
 
   return h('div.panel#scoreform',
@@ -1317,7 +1368,7 @@ function scoreForm(p, crits, locked, list) {
       h('button.btn.sm.ghost', { disabled: !prev, onclick: () => goJudge(prev.id) }, '← Prev'),
       h('span.pos', idx >= 0 ? `${idx + 1} of ${list.length}` : ''),
       h('button.btn.sm.ghost', { disabled: !next, onclick: () => goJudge(next.id) }, 'Next →')),
-    h('div.row.between', h('div', h('span.kicker', p.division || WORDS().One), h('h2', { style: { margin: 0 } }, partLabel(p)),
+    h('div.row.between', h('div', h('span.kicker', [heatsOn() ? heatLabel(judgeRound()) : null, p.division || (heatsOn() ? null : WORDS().One)].filter(Boolean).join(' · ')), h('h2', { style: { margin: 0 } }, partLabel(p)),
       h('div.muted', partSub(p))),
     live?.submitted ? h('span.badge.submitted', 'Submitted') : live ? h('span.badge.draft', 'Draft — saved on device') : null),
     photoStrip(p),
@@ -1364,11 +1415,13 @@ function quickNotesPicker(live, locked, set) {
 }
 
 // ============================================================ results (admin)
-function computeResults(includeDrafts) {
+function computeResults(includeDrafts, round = null) {
   const crits = criteria();
+  const final = round === 'final';
   const jIds = new Set(judges().filter(j => j.active).map(j => j.id));
-  const rows = participants().filter(p => p.status !== 'no_show').map(p => {
-    const scs = Object.values(S.data.scores).filter(s => s.participantId === p.id && !s.deleted && (s.submitted || includeDrafts) && scoreTotal(s, crits).filled);
+  const pool = heatsOn() && final ? participants().filter(p => p.finalist) : participants();
+  const rows = pool.filter(p => p.status !== 'no_show' || (final && p.finalist)).map(p => {
+    const scs = Object.values(S.data.scores).filter(s => s.participantId === p.id && !s.deleted && roundOf(s) === (final ? 'final' : null) && (s.submitted || includeDrafts) && scoreTotal(s, crits).filled);
     scs.forEach(s => jIds.add(s.judgeId));
     const totals = scs.map(s => scoreTotal(s, crits).total);
     const avg = totals.length ? totals.reduce((a, b) => a + b, 0) / totals.length : null;
@@ -1377,7 +1430,7 @@ function computeResults(includeDrafts) {
     return { p, n: scs.length, avg, critAvg, scores: scs };
   });
   const byDiv = {};
-  rows.forEach(r => { (byDiv[r.p.division || 'No division'] ||= []).push(r); });
+  rows.forEach(r => { (byDiv[heatsOn() ? (final ? 'Finals' : 'All heats combined') : (r.p.division || 'No division')] ||= []).push(r); });
   for (const list of Object.values(byDiv)) {
     list.sort((a, b) => (b.avg ?? -1) - (a.avg ?? -1) || byNum(a.p, b.p));
     list.forEach((r, i) => {
@@ -1391,19 +1444,24 @@ function computeResults(includeDrafts) {
 
 function viewResults() {
   const st = settings();
-  const { crits, byDiv, rows, judgeCount } = computeResults(ui.includeDrafts);
+  const final = heatsOn() && ui.resultsRound === 'final';
+  const { crits, byDiv, rows, judgeCount } = computeResults(ui.includeDrafts, final ? 'final' : null);
   const max = maxTotal(crits);
   const checkedIn = participants().filter(p => p.checkedIn).length;
   const fully = rows.filter(r => r.n >= judgeCount && judgeCount > 0).length;
-  const subCount = Object.values(S.data.scores).filter(s => s.submitted && !s.deleted && inCur(s)).length;
+  const subCount = Object.values(S.data.scores).filter(s => s.submitted && !s.deleted && inCur(s) && (!heatsOn() || roundOf(s) === (final ? 'final' : null))).length;
   const W = WORDS();
   const canEdit = manages();
   const best = rows.filter(r => r.avg != null).sort((a, b) => b.avg - a.avg)[0];
   const divOrder = [...(st.divisions || []), ...Object.keys(byDiv).filter(d => !(st.divisions || []).includes(d))].filter(d => byDiv[d]);
 
   return h('div.stack',
+    heatsOn() ? h('div.round-pick.results-rounds', { role: 'tablist' }, [['heats', `Heats (${st.heats})`], ['final', 'Finals']].map(([k, label]) =>
+      h('button', { type: 'button', role: 'tab', class: (final ? 'final' : 'heats') === k ? 'on' : '', onclick: () => { ui.resultsRound = k; render(); } }, label))) : null,
+    heatsOn() && !final ? finalistsPanel(rows, judgeCount) : null,
+    final ? podium(rows) : null,
     h('div.tiles',
-      h('div.tile', h('div.v', checkedIn), h('div.l', 'Checked in')),
+      h('div.tile', h('div.v', final ? rows.length : checkedIn), h('div.l', final ? 'Finalists' : 'Checked in')),
       h('div.tile', h('div.v', `${fully}/${rows.filter(r => r.p.checkedIn || r.n).length}`), h('div.l', `Scored by all ${judgeCount} judges`)),
       h('div.tile', h('div.v', subCount), h('div.l', 'Score sheets submitted')),
       h('div.tile', { class: st.scoresLocked ? 'on' : '' }, h('div.v.word', st.scoresLocked ? 'Locked' : 'Open'), h('div.l', 'Scoring'))),
@@ -1413,37 +1471,91 @@ function viewResults() {
         h('label.check', h('input', { type: 'checkbox', checked: ui.includeDrafts, onchange: e => { ui.includeDrafts = e.target.checked; render(); } }), 'Include unsubmitted drafts')),
       h('div.row',
         h('button.btn', { onclick: () => window.print() }, 'Print'),
-        h('button.btn', { onclick: () => exportResults(byDiv, crits) }, 'Export CSV'))),
-    best ? h('div.panel.accent', h('span.kicker', 'Highest overall score'), h('h2', { style: { margin: '.2rem 0' } }, partLabel(best.p)),
+        h('button.btn', { onclick: () => exportResults(crits) }, 'Export CSV'))),
+    best && !final ? h('div.panel.accent', h('span.kicker', heatsOn() ? 'Highest heat score' : 'Highest overall score'), h('h2', { style: { margin: '.2rem 0' } }, partLabel(best.p)),
       h('div.muted', partSub(best.p), ` — ${fmt1(best.avg)} / ${max}`)) : null,
     divOrder.length ? divOrder.map(div => h('div.panel',
       h('h3', div),
       h('div.table-wrap', h('table',
-        h('thead', h('tr', h('th', 'Rank'), h('th', '#'), h('th', W.One), h('th.r', 'Judges'), crits.map(c => h('th.r', { title: c.name }, c.name.split(/[ /]/)[0])), h('th.r', 'Average'), h('th.r', '%'))),
+        h('thead', h('tr', h('th', 'Rank'), h('th', '#'), h('th', W.One), heatsOn() && !final ? h('th', 'Heat') : null, heatsOn() && !final ? h('th', { title: 'Finalist' }, 'Final') : null, h('th.r', 'Judges'), crits.map(c => h('th.r', { title: c.name }, c.name.split(/[ /]/)[0])), h('th.r', 'Average'), h('th.r', '%'))),
         h('tbody', byDiv[div].map(r => h('tr', { class: canEdit ? 'click' : '', onclick: canEdit ? () => { location.hash = '#/review/' + r.p.id; } : null },
           h('td', r.rank ? h('span', h('span.rank', { class: r.rank <= 3 ? 'r' + r.rank : '' }, r.rank), r.tie ? h('span.badge.tie', { style: { marginLeft: '.4rem' } }, 'tie') : null) : h('span.muted', '—')),
           h('td.mono', r.p.number),
           h('td', h('div', r.p.title || r.p.name), h('div.small.muted', r.p.title ? (r.p.name ? 'by ' + r.p.name : '') : (r.p.character || '')),
             (() => { const t = noteTally(r.scores); return t.length ? h('div.note-tally', t.slice(0, 4).map(([tag, n]) => h('span.qtag', tag, n > 1 ? h('b', ' ×' + n) : null)), t.length > 4 ? h('span.small.muted', ` +${t.length - 4} more`) : null) : null; })()),
+          heatsOn() && !final ? h('td', r.p.heat ? r.p.heat : h('span.muted', '—')) : null,
+          heatsOn() && !final ? h('td', finalistToggle(r.p)) : null,
           h('td.r', { style: { color: r.n < judgeCount ? 'var(--warn)' : '' } }, `${r.n}/${judgeCount}`),
           crits.map(c => h('td.r', fmt1(r.critAvg[c.id]))),
           h('td.r', h('b', fmt1(r.avg))),
           h('td.r.muted', r.avg != null && max ? Math.round(r.avg / max * 100) + '%' : '—')))))))) : h('div.panel.muted', 'No scores yet.'),
     h('p.small.muted', 'Average = mean of each judge\'s weighted total. Ties are flagged, not broken automatically.' + (canEdit ? ' Click a row to see or adjust individual scores.' : '')));
 }
-function exportResults(byDiv, crits) {
+// Heats: the top N across all heats combined, as the lead confirms them. Finals start from zero.
+function finalistsPanel(rows, judgeCount) {
+  const st = settings();
+  const N = st.finalists || 3;
+  const ranked = rows.filter(r => r.avg != null).sort((a, b) => b.avg - a.avg || byNum(a.p, b.p));
+  const top = ranked.slice(0, N);
+  const cut = top.length === N ? top[N - 1].avg : null;
+  const tied = cut != null ? ranked.slice(N).filter(r => Math.abs(r.avg - cut) < 1e-9) : [];
+  const current = participants().filter(p => p.finalist);
+  const matches = current.length === top.length && top.every(r => r.p.finalist);
+  const waiting = rows.filter(r => r.p.checkedIn && r.n < judgeCount).length;
+  const confirm = () => {
+    if (!top.length) return;
+    if (current.length && !window.confirm(`Replace the current finalists with the top ${top.length}?`)) return;
+    for (const p of participants()) {
+      const i = top.findIndex(r => r.p.id === p.id);
+      if (i >= 0) mutate('participants', p.id, { finalist: true, status: 'checked_in', checkedIn: true, finalOrder: top.length - i }); // lowest qualifier walks first
+      else if (p.finalist) mutate('participants', p.id, { finalist: false });
+    }
+    toast(`${top.length} finalist${top.length === 1 ? '' : 's'} confirmed. Judges can now pick Finals.`, 'ok');
+  };
+  return h('div.panel.accent.finalists',
+    h('div.row.between', h('div', h('span.kicker', 'Finals'), h('h3', { style: { margin: '.2rem 0' } }, `Top ${N} across all heats go to the finals`)),
+      manages() ? h('button.btn.primary', { disabled: !top.length || matches, onclick: confirm }, matches ? 'Finalists confirmed' : `Confirm top ${top.length || N} as finalists`) : null),
+    top.length ? h('div.list', top.map((r, i) => h('div.item', h('div.num', i + 1), h('div.who', h('div.n', partLabel(r.p)), h('div.c', partSub(r.p))),
+      h('span.badge', fmt1(r.avg)), r.p.finalist ? h('span.badge.submitted', 'finalist') : null))) : h('p.muted', 'No heat scores yet.'),
+    tied.length ? h('div.banner.warn', h('span.tag', 'Tie'), h('span.grow', `${tied.map(r => partLabel(r.p)).join(', ')} ${tied.length === 1 ? 'is' : 'are'} tied with the last finalist spot. Use the Final column below to choose who goes through.`)) : null,
+    waiting ? h('p.small.muted', `${waiting} checked-in ${waiting === 1 ? 'entry is' : 'entries are'} still missing scores from some judges, so this list can still change.`) : null,
+    current.length && !matches ? h('p.small.muted', `Current finalists: ${current.map(partLabel).join(', ')}.`) : null);
+}
+function finalistToggle(p) {
+  if (!manages()) return p.finalist ? h('span', { title: 'Finalist' }, '★') : null;
+  return h('button.btn.sm.ghost.star', { class: p.finalist ? 'on' : '', title: p.finalist ? 'Remove from finals' : 'Send to finals',
+    onclick: e => {
+      e.stopPropagation();
+      if (p.finalist) mutate('participants', p.id, { finalist: false });
+      else mutate('participants', p.id, { finalist: true, status: 'checked_in', checkedIn: true, finalOrder: Math.max(0, ...participants().filter(x => x.finalist).map(x => x.finalOrder || 0)) + 1 });
+    } }, p.finalist ? '★' : '☆');
+}
+function podium(rows) {
+  const placed = rows.filter(r => r.rank && r.rank <= 3).sort((a, b) => a.rank - b.rank);
+  if (!placed.length) return h('div.panel.muted', 'Finals scores show here as judges submit them.');
+  const classic = placed.length === 3 && placed.map(r => r.rank).join() === '1,2,3';
+  return h('div.podium', { class: classic ? 'classic' : '' }, placed.map(r => h('div.panel.place', { class: 'p' + r.rank },
+    h('div.medal', ordinal(r.rank)), h('div.pname', partLabel(r.p)), h('div.small.muted', partSub(r.p)),
+    h('div.score', fmt1(r.avg)), r.tie ? h('span.badge.tie', 'tie') : null)));
+}
+
+function exportResults(crits) {
   const W = WORDS();
   const who = isMakers() ? ['Entry', 'Maker', 'Materials'] : ['Name', 'Character', 'Series'];
   const whoOf = p => isMakers() ? [p.title, p.name, p.materials] : [p.name, p.character, p.series];
-  const lines = [[W.division, 'Rank', 'Tie', 'Number', ...who, 'Judges', ...crits.map(c => c.name + ' (avg)'), 'Average total', 'Quick notes'].map(csvCell).join(',')];
-  for (const [div, list] of Object.entries(byDiv)) for (const r of list) {
-    lines.push([div, r.rank ?? '', r.tie ? 'yes' : '', r.p.number, ...whoOf(r.p), r.n, ...crits.map(c => r.critAvg[c.id] == null ? '' : r.critAvg[c.id].toFixed(2)), r.avg == null ? '' : r.avg.toFixed(2), tallyText(noteTally(r.scores))].map(csvCell).join(','));
+  const H = heatsOn();
+  const lines = [[H ? 'Round' : W.division, 'Rank', 'Tie', 'Number', ...who, ...(H ? ['Heat', W.division, 'Finalist'] : []), 'Judges', ...crits.map(c => c.name + ' (avg)'), 'Average total', 'Quick notes'].map(csvCell).join(',')];
+  for (const round of H ? [null, 'final'] : [null]) {
+    const { byDiv } = computeResults(ui.includeDrafts, round);
+    for (const [div, list] of Object.entries(byDiv)) for (const r of list) {
+      lines.push([div, r.rank ?? '', r.tie ? 'yes' : '', r.p.number, ...whoOf(r.p), ...(H ? [r.p.heat || '', r.p.division || '', r.p.finalist ? 'yes' : ''] : []), r.n, ...crits.map(c => r.critAvg[c.id] == null ? '' : r.critAvg[c.id].toFixed(2)), r.avg == null ? '' : r.avg.toFixed(2), tallyText(noteTally(r.scores))].map(csvCell).join(','));
+    }
   }
   // Second section: raw score sheets (comments are not sent to view-only accounts)
-  lines.push('', ['Number', who[0], 'Judge', 'Submitted', ...crits.map(c => c.name), 'Total', 'Quick notes', 'Comment'].map(csvCell).join(','));
+  lines.push('', [...(H ? ['Round'] : []), 'Number', who[0], 'Judge', 'Submitted', ...crits.map(c => c.name), 'Total', 'Quick notes', 'Comment'].map(csvCell).join(','));
   for (const s of Object.values(S.data.scores).filter(x => !x.deleted && inCur(x))) {
     const p = S.data.participants[s.participantId]; if (!p || p.deleted) continue;
-    lines.push([p.number, p.title || p.name, userName(s.judgeId), s.submitted ? 'yes' : 'no', ...crits.map(c => s.values?.[c.id] ?? ''), scoreTotal(s, crits).total, (s.tags || []).join('; '), s.comment || ''].map(csvCell).join(','));
+    lines.push([...(H ? [s.round === 'final' ? 'Finals' : (p.heat ? 'Heat ' + p.heat : 'Heats')] : []), p.number, p.title || p.name, userName(s.judgeId), s.submitted ? 'yes' : 'no', ...crits.map(c => s.values?.[c.id] ?? ''), scoreTotal(s, crits).total, (s.tags || []).join('; '), s.comment || ''].map(csvCell).join(','));
   }
   const slug = settings().name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'results';
   download(`${slug}-results-${new Date().toISOString().slice(0, 10)}.csv`, lines.join('\n'));
@@ -1467,8 +1579,10 @@ function viewReview(pid) {
 function reviewDetail(p) {
   const crits = criteria();
   const js = judges();
-  const scoreFor = j => S.data.scores[p.id + '__' + j.id];
-  const extra = Object.values(S.data.scores).filter(s => s.participantId === p.id && !js.some(j => j.id === s.judgeId)).map(s => ({ id: s.judgeId, displayName: userName(s.judgeId) }));
+  const round = heatsOn() && p.finalist && ui.reviewRound === 'final' ? 'final' : null;
+  const sid = j => p.id + '__' + j.id + (round === 'final' ? '__final' : '');
+  const scoreFor = j => S.data.scores[sid(j)];
+  const extra = Object.values(S.data.scores).filter(s => s.participantId === p.id && roundOf(s) === round && !js.some(j => j.id === s.judgeId)).map(s => ({ id: s.judgeId, displayName: userName(s.judgeId) }));
   const rowsJ = [...js, ...extra];
   const history = Object.values(S.data.audit).filter(a => a.participantId === p.id || a.target === p.id).sort((a, b) => b.ts - a.ts);
 
@@ -1477,6 +1591,8 @@ function reviewDetail(p) {
       h('div.row.between', h('div', h('h2', { style: { margin: 0 } }, partLabel(p)), h('div.muted', partSub(p))),
         h('span.badge', { class: p.status }, (p.status || '').replace('_', ' '))),
       photoStrip(p),
+      heatsOn() && p.finalist ? h('div.round-pick', { style: { marginTop: '1rem' } }, [[null, p.heat ? heatLabel(p.heat) : 'Heat'], ['final', 'Finals']].map(([k, label]) =>
+        h('button', { type: 'button', class: round === k ? 'on' : '', onclick: () => { ui.reviewRound = k; render(); } }, label))) : null,
       h('div.table-wrap', { style: { marginTop: '1rem' } }, h('table',
         h('thead', h('tr', h('th', 'Judge'), crits.map(c => h('th.r', c.name.split(/[ /]/)[0])), h('th.r', 'Total'), h('th', 'Status'), h('th', ''))),
         h('tbody', rowsJ.map(j => {
@@ -1487,7 +1603,7 @@ function reviewDetail(p) {
             h('td.r', h('b', live ? fmt1(scoreTotal(live, crits).total) : '–')),
             h('td', live ? h('span.badge', { class: live.submitted ? 'submitted' : 'draft' }, live.submitted ? 'submitted' : 'draft') : h('span.muted.small', s?.deleted ? 'cleared' : 'not scored'),
               s && s.updatedBy && s.updatedBy !== j.id ? h('div.small.muted', 'edited by ' + userName(s.updatedBy)) : null),
-            h('td', h('button.btn.sm', { onclick: () => editScore(p, j, s) }, live ? 'Adjust' : 'Enter')));
+            h('td', h('button.btn.sm', { onclick: () => editScore(p, j, s, round) }, live ? 'Adjust' : 'Enter')));
         })))),
       (() => {
         const live = rowsJ.map(scoreFor).filter(s => s && !s.deleted);
@@ -1502,7 +1618,8 @@ function reviewDetail(p) {
     h('div.panel', h('h3', 'History'), history.length ? h('div.list', history.map(a => h('div.small', h('span.muted', fmtTime(a.ts) + ' · '), describeAudit(a)))) : h('p.muted.small', 'No changes recorded.')));
 }
 
-function editScore(p, j, s) {
+function editScore(p, j, s, round = null) {
+  const sid = p.id + '__' + j.id + (round === 'final' ? '__final' : '');
   const crits = criteria();
   const inputs = {};
   const reason = h('textarea', { rows: 2, placeholder: 'Why is this being changed? (required — kept in the audit log)' });
@@ -1517,7 +1634,7 @@ function editScore(p, j, s) {
       onclick: () => {
         if (!reason.value.trim()) { toast('Enter a reason first', 'bad'); return; }
         if (!confirm('Clear this judge\'s sheet for this contestant?')) return;
-        mutate('scores', p.id + '__' + j.id, { deleted: true, reason: reason.value.trim() }); close();
+        mutate('scores', sid, { deleted: true, reason: reason.value.trim() }); close();
       },
     }, 'Clear sheet') : null,
     h('button.btn.ghost', { onclick: () => close() }, 'Cancel'),
@@ -1526,7 +1643,7 @@ function editScore(p, j, s) {
         if (!reason.value.trim()) { toast('Enter a reason for the change', 'bad'); reason.focus(); return; }
         const values = {};
         for (const c of crits) { const v = inputs[c.id].value; values[c.id] = v === '' ? null : Math.max(0, Math.min(c.max, Number(v))); }
-        mutate('scores', p.id + '__' + j.id, { values, submitted: submitted.checked, deleted: false, reason: reason.value.trim() });
+        mutate('scores', sid, { values, submitted: submitted.checked, deleted: false, reason: reason.value.trim(), ...(round === 'final' ? { round: 'final', participantId: p.id, judgeId: j.id } : {}) });
         toast('Score updated', 'ok'); close();
       },
     }, 'Save change'),
@@ -1547,6 +1664,8 @@ function describeAudit(a) {
     case 'participant.checkin': return h('span', h('b', a.username), ` checked in ${a.label}`);
     case 'participant.checkout': return h('span', h('b', a.username), ` undid check-in for ${a.label}`);
     case 'participant.delete': return h('span', h('b', a.username), ` deleted ${a.label}`);
+    case 'participant.finalist': return h('span', h('b', a.username), ` sent ${a.label} to the finals`);
+    case 'participant.unfinalist': return h('span', h('b', a.username), ` removed ${a.label} from the finals`);
     case 'settings.update': return h('span', h('b', a.username), ' changed the event name: ', kv2(a.after));
     case 'contest.create': return h('span', h('b', a.username), ` created contest ${a.label}`);
     case 'contests.update': return h('span', h('b', a.username), ' changed contest settings: ', kv2(a.after));
@@ -1593,6 +1712,8 @@ function viewSetup() {
   const warn = h('input', { type: 'number', min: 0, value: ed.warn ?? st.warnSeconds, oninput: keep('warn') });
   const divs = h('input', { type: 'text', value: ed.divs ?? (st.divisions || []).join(', '), oninput: keep('divs') });
   const notes = h('textarea', { rows: 6, placeholder: 'One per line, e.g. Exceptional electronics', oninput: keep('notes') }, ed.notes ?? (st.quickNotes || []).join('\n'));
+  const heats = h('input', { type: 'number', min: 0, max: 12, value: ed.heats ?? (st.heats || 0), oninput: keep('heats') });
+  const finalists = h('input', { type: 'number', min: 1, max: 50, value: ed.finalists ?? (st.finalists || 3), oninput: keep('finalists') });
   const crits = criteria();
   const online = S.net === 'online';
 
@@ -1605,11 +1726,18 @@ function viewSetup() {
         h('label.field', h('span', 'Stage time per contestant (seconds)'), secs),
         h('label.field', h('span', 'Warning when this many seconds remain'), warn)),
       h('label.field', h('span', `${W.divisions} (comma separated)`), divs),
+      h('div.form-grid',
+        h('label.field', h('span', 'Heats (0 = no heats)'), heats,
+          h('span.small.muted', 'Split the first round into heats. Judges pick the heat they are scoring.')),
+        h('label.field', h('span', 'Finalists from all heats combined'), finalists,
+          h('span.small.muted', 'The top scorers across every heat go to a finals round, scored again from zero.'))),
       h('label.field', h('span', 'Quick notes for judges (one per line)'), notes,
         h('span.small.muted', 'Judges tick these while scoring. Removing one here keeps any ticks already made.')),
       h('div', h('button.btn.primary', {
         onclick: () => {
-          const patch = { name: name.value.trim() || st.name, divisions: divs.value.split(',').map(x => x.trim()).filter(Boolean), quickNotes: notes.value.split('\n').map(x => x.trim()).filter(Boolean) };
+          const patch = { name: name.value.trim() || st.name, divisions: divs.value.split(',').map(x => x.trim()).filter(Boolean), quickNotes: notes.value.split('\n').map(x => x.trim()).filter(Boolean),
+            heats: Math.max(0, Math.min(12, Math.round(Number(heats.value) || 0))), finalists: Math.max(1, Math.min(50, Math.round(Number(finalists.value) || 3))) };
+          if (patch.heats < (st.heats || 0) && participants().some(p => p.heat > patch.heats) && !confirm(`Some entries are in heats above ${patch.heats}. They will show as "No heat" until you move them. Continue?`)) return;
           if (!isMakers()) Object.assign(patch, { stageSeconds: Number(secs.value) || 90, warnSeconds: Number(warn.value) || 0 });
           if (isAdmin() && type.value !== st.type) {
             if (!confirm(`Switch this contest to ${TYPE_INFO[type.value].label}? Existing ${W.many} and scores are kept; the screens and wording change.`)) return;

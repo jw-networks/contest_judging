@@ -489,3 +489,31 @@ tr.click:hover td { background: var(--panel-2); }
 .rank-div { margin: .8rem 0 .3rem; font-size: 12px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
 .my-rank { margin-top: 2px; color: var(--cyan); font-weight: 700; }
 .item .num.unranked { color: var(--dim); }
+
+/* Heats & finals */
+.round-pick { display: flex; flex-wrap: wrap; gap: 2px; margin: .5rem 0 .4rem; }
+.round-pick button {
+  flex: 1 1 auto; min-height: 42px; padding: 0 12px; cursor: pointer; border: 0; border-top: 2px solid var(--line-2);
+  background: var(--panel-3); color: var(--muted); font: inherit; font-weight: 800; font-size: 13px; letter-spacing: .1em; text-transform: uppercase; white-space: nowrap;
+}
+.round-pick button:hover:not(:disabled) { color: var(--text); border-top-color: var(--cyan); }
+.round-pick button.on { background: var(--teal); color: #fff; border-top-color: var(--cyan); }
+.round-pick button:disabled { opacity: .45; cursor: default; }
+.round-pick .n { margin-left: 6px; font-size: 11px; opacity: .75; }
+.results-rounds { margin: 0; }
+.results-rounds button { min-height: 48px; font-size: 15px; }
+.btn.star { min-width: 40px; font-size: 18px; letter-spacing: 0; color: var(--dim); }
+.btn.star.on { color: var(--warn); }
+.finalists .list { margin-top: .6rem; }
+.podium { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; align-items: end; }
+.podium .place { text-align: center; border-top: 3px solid var(--line-2); }
+.podium .place.p1 { border-top-color: #e8c35a; padding-top: 28px; }
+.podium .place.p2 { border-top-color: #c9d1d6; }
+.podium .place.p3 { border-top-color: #c98b5a; }
+.podium.classic .place.p1 { order: 2; } .podium.classic .place.p2 { order: 1; } .podium.classic .place.p3 { order: 3; }
+.podium .pname { margin: .3rem 0 .2rem; font-size: 22px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
+.podium .medal { font-weight: 900; font-size: 28px; letter-spacing: .06em; text-transform: uppercase; color: var(--cyan); }
+.podium .place.p1 .medal { color: #e8c35a; font-size: 34px; }
+.podium .score { margin-top: .4rem; font-size: 26px; font-weight: 900; }
+@media (max-width: 700px) { .podium { grid-template-columns: 1fr; } .podium .place { order: 0 !important; } }
+@media print { .round-pick { display: none; } }

@@ -90,6 +90,16 @@ All of this is enforced by the Worker. A device only ever receives the records i
 
 The **confidence monitor** needs no sign-in, so it can run on a screen facing the stage. It shows only the stage information for its contest.
 
+## Heats and finals
+
+In **Setup → Contest**, set **Heats** (0 = no heats) and **Finalists from all heats combined** (default 3).
+
+- Coordinators put each entry in a heat when adding or editing it. New entries go to the heat with the fewest people by default.
+- Stage control has a round picker (Heat 1, Heat 2 … Finals). The confidence monitor shows the round.
+- Judges pick the heat they're scoring at the top of their list. If the stage moves to another heat, they're offered a one-tap switch. **My ranking** ranks within the heat on screen.
+- **Results → Heats** ranks every heat entry together. The contest lead presses **Confirm top N as finalists**, or uses the ☆ column to settle a tie by hand. Finalists walk the finals lowest qualifier first.
+- Finals are scored again from zero, on separate score sheets. **Results → Finals** shows the top 3 podium. The CSV export includes both rounds.
+
 ## Show details, photos and after the event
 
 - **Show details:** in a cosplay contestant's editor, coordinators fill in *music & sound cue*, *lighting notes*, *name pronunciation* and an *emcee intro*. These can also be CSV columns. The tech and emcee screens update on their own as the stage moves. Coordinators, leads and admins can open them from **Stage → Tech view / Emcee view**.

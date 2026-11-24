@@ -326,6 +326,10 @@ export class Contest {
         if (has('divisions') && Array.isArray(patch.divisions)) p.divisions = patch.divisions.map(x => str(x, 60)).filter(Boolean).slice(0, 30);
         if (has('quickNotes') && Array.isArray(patch.quickNotes)) p.quickNotes = [...new Set(patch.quickNotes.map(x => str(String(x ?? '').trim(), 40)).filter(Boolean))].slice(0, 40);
         if (has('scoresLocked')) p.scoresLocked = !!patch.scoresLocked;
+        // Heats: 0 = no heats (one round). With heats, every entry is in one heat; the top `finalists`
+        // across all heats combined go on to a finals round that is scored again from zero.
+        if (has('heats')) p.heats = Math.round(num(patch.heats, 0, 12, 0));
+        if (has('finalists')) p.finalists = Math.round(num(patch.finalists, 1, 50, 3));
         if (has('order')) p.order = num(patch.order, -1e6, 1e6, 0);
         if (has('archived')) p.archived = !!patch.archived;
         break;
@@ -345,6 +349,9 @@ export class Contest {
         if (has('status') && STATUSES.includes(patch.status)) p.status = patch.status;
         if (has('checkedIn')) p.checkedIn = !!patch.checkedIn;
         if (has('order')) p.order = num(patch.order, -1e9, 1e9, 0);
+        if (has('heat')) p.heat = patch.heat == null || patch.heat === '' ? null : Math.round(num(patch.heat, 1, 12, 1));
+        if (has('finalist')) p.finalist = !!patch.finalist;
+        if (has('finalOrder')) p.finalOrder = num(patch.finalOrder, -1e9, 1e9, 0);
         break;
       case 'scores':
         if (has('values') && patch.values && typeof patch.values === 'object') {
@@ -369,6 +376,8 @@ export class Contest {
         if (has('remainingMs')) p.remainingMs = Math.round(num(patch.remainingMs, -3600e3, 3600e3, 0));
         if (has('seq')) p.seq = num(patch.seq, 0, 1e14, 0);
         if (has('startedAt')) p.startedAt = patch.startedAt == null ? null : Math.round(num(patch.startedAt, 0, 1e14, 0));
+        // Which round the stage is running: a heat number, or 'final'.
+        if (has('round')) p.round = patch.round === 'final' ? 'final' : patch.round == null ? null : Math.round(num(patch.round, 1, 12, 1));
         delete p.deleted;
         break;
     }
@@ -403,9 +412,10 @@ export class Contest {
       if (!this.manages(user, cid)) return denied;
       if ((patch.deleted !== undefined || patch.archived !== undefined) && user.role !== 'admin') return { ok: false, reason: 'only admins can archive or delete contests' };
     } else if (coll === 'scores') {
-      const sep = id.indexOf('__');
-      if (sep < 1) return { ok: false, reason: 'invalid score id' };
-      const participantId = id.slice(0, sep), judgeId = id.slice(sep + 2);
+      // Score ids: participant__judge for the main (heat) round, participant__judge__final for finals.
+      const parts = id.split('__');
+      if (!(parts.length === 2 || (parts.length === 3 && parts[2] === 'final')) || !parts[0] || !parts[1]) return { ok: false, reason: 'invalid score id' };
+      const [participantId, judgeId] = parts, round = parts[2] || null;
       const part = db.data.participants[participantId];
       cid = part && part.contestId;
       const c = this.contest(cid);
@@ -415,6 +425,7 @@ export class Contest {
         if (judgeId !== user.id) return { ok: false, reason: 'judges can only score as themselves' };
         if (c.scoresLocked) return { ok: false, reason: 'scoring is locked', current: existing ? this.project(user, coll, existing) : undefined };
         if (part.deleted || !part.checkedIn) return { ok: false, reason: 'contestant is not checked in' };
+        if (round === 'final' && !part.finalist) return { ok: false, reason: 'not a finalist' };
         delete patch.reason;
       } else if (r === 'admin' || r === 'lead') {
         if (judgeId !== user.id && !patch.reason) return { ok: false, reason: 'a reason is required when editing another judge\'s score' };
@@ -423,6 +434,7 @@ export class Contest {
         return { ok: false, reason: 'changed by ' + (db.users[existing.updatedBy]?.displayName || 'another user'), current: this.project(user, coll, existing) };
       }
       Object.assign(patch, { participantId, judgeId, contestId: cid });
+      if (round) patch.round = round;
       if (existing && existing.values && patch.values) patch.values = { ...existing.values, ...patch.values };
     } else {
       // criteria, participants, stage
@@ -434,6 +446,10 @@ export class Contest {
       const ok = coll === 'criteria' ? (r === 'admin' || r === 'lead') : (r === 'admin' || r === 'lead' || r === 'coordinator');
       if (!ok) return denied;
       if (coll === 'participants' && patch.deleted && !(r === 'admin' || r === 'lead')) return { ok: false, reason: 'only a contest lead or admin can delete entries' };
+      if (coll === 'participants' && (patch.finalist !== undefined || patch.finalOrder !== undefined) && !(r === 'admin' || r === 'lead')) {
+        if (patch.finalist !== undefined && !!patch.finalist !== !!(existing && existing.finalist)) return { ok: false, reason: 'only a contest lead or admin can choose finalists' };
+        delete patch.finalist; delete patch.finalOrder;
+      }
     }
 
     if (coll === 'participants') {
@@ -461,6 +477,8 @@ export class Contest {
       this.audit(user, 'score.submit', { contestId: cid, target: id, participantId: rec.participantId, judgeId: rec.judgeId, after: { values: rec.values } });
     } else if (coll === 'participants' && patch.checkedIn !== undefined && (!before || !!before.checkedIn !== !!rec.checkedIn)) {
       this.audit(user, rec.checkedIn ? 'participant.checkin' : 'participant.checkout', { contestId: cid, target: id, label: label(rec) });
+    } else if (coll === 'participants' && patch.finalist !== undefined && !!patch.finalist !== !!(before && before.finalist)) {
+      this.audit(user, rec.finalist ? 'participant.finalist' : 'participant.unfinalist', { contestId: cid, target: id, label: label(rec) });
     } else if (coll === 'participants' && patch.deleted) {
       this.audit(user, 'participant.delete', { contestId: cid, target: id, label: label(rec) });
     } else if (coll === 'contests' || coll === 'criteria' || coll === 'settings') {
@@ -508,6 +526,7 @@ export class Contest {
       contestId: cid, contestName: c.name, eventName: ev.name || '', type: c.type, warnSeconds: c.warnSeconds,
       state: s.state, durationMs: s.durationMs, startedAt: s.startedAt, remainingMs: s.remainingMs, seq: s.seq || 0,
       current: pick(s.participantId), next: pick(s.nextParticipantId), serverTime: Date.now(),
+      roundLabel: c.heats > 0 && s.round ? (s.round === 'final' ? 'Finals' : `Heat ${s.round}`) : '',
     };
   }
 
