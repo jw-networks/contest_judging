@@ -98,6 +98,8 @@ In **Setup → Contest**, set **Heats** (0 = no heats) and **Finalists from all 
 - Stage control has a round picker (Heat 1, Heat 2 … Finals). The confidence monitor shows the round.
 - Judges pick the heat they're scoring at the top of their list. If the stage moves to another heat, they're offered a one-tap switch. **My ranking** ranks within the heat on screen.
 - **Results → Heats** ranks every heat entry together. The contest lead presses **Confirm top N as finalists**, or uses the ☆ column to settle a tie by hand. Finalists walk the finals lowest qualifier first.
+- **Heat size:** *Max contestants per heat* (default 14) is for pre-registered and imported entries. *Extra walk-up slots per heat* (default 4) are kept for people who sign up on the day, who can also use any unused regular place. Check-in shows how full each heat is. Coordinators can't add to a full heat; a contest lead can override. No-shows free up their place.
+- **Import with heats:** add a `heat` column (and optionally a `walk-up` yes/no column) to the CSV. Rows with no heat, or a heat that doesn't exist, go to the heat with the most room. Rows over a heat's limit are still imported, with a warning.
 - Finals are scored again from zero, on separate score sheets. **Results → Finals** shows the top 3 podium. The CSV export includes both rounds.
 
 ## Show details, photos and after the event

@@ -517,3 +517,17 @@ tr.click:hover td { background: var(--panel-2); }
 .podium .score { margin-top: .4rem; font-size: 26px; font-weight: 900; }
 @media (max-width: 700px) { .podium { grid-template-columns: 1fr; } .podium .place { order: 0 !important; } }
 @media print { .round-pick { display: none; } }
+
+/* Heat capacity on check-in */
+.heat-cap { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin-bottom: 1rem; }
+.heat-tile { text-align: left; padding: 10px 12px; cursor: pointer; border: 0; border-top: 2px solid var(--line-2); background: var(--panel); color: var(--text); font: inherit; }
+.heat-tile:hover { border-top-color: var(--cyan); }
+.heat-tile.on { background: var(--teal-deep); border-top-color: var(--cyan); }
+.heat-tile .k { font-size: 12px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; color: var(--cyan); }
+.heat-tile .v { font-size: 26px; font-weight: 900; line-height: 1.1; }
+.heat-tile .l { font-size: 12px; color: var(--muted); }
+.heat-tile .bar { height: 4px; margin-top: 6px; background: var(--panel-3); }
+.heat-tile .bar span { display: block; height: 100%; background: var(--teal); }
+.heat-tile.regfull .bar span { background: var(--warn); }
+.heat-tile.full .bar span { background: var(--bad); }
+.heat-tile.full .v { color: var(--bad); }

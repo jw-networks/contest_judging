@@ -222,10 +222,25 @@ function roundPicker(cur, onPick, { counts, finalsReady = participants().some(p 
     onclick: () => onPick(r),
   }, heatLabel(r), counts ? h('span.n', counts(r)) : null)));
 }
-function nextFreeHeat() {
-  const n = settings().heats || 0; if (!n) return null;
-  const c = Array.from({ length: n }, (_, i) => participants().filter(p => p.heat === i + 1 && p.status !== 'no_show').length);
-  return c.indexOf(Math.min(...c)) + 1;
+// Heat capacity: heatSize pre-registered places plus walkUps places kept for walk-ups. Walk-ups may also take
+// any unused regular place, so a heat never holds more than heatSize + walkUps. No-shows don't count.
+const heatSize = () => settings().heatSize ?? 14;
+const walkUpSlots = () => settings().walkUps ?? 4;
+function heatLoad(n, exceptId) {
+  const ps = participants().filter(p => p.heat === n && p.status !== 'no_show' && p.id !== exceptId);
+  const walk = ps.filter(p => p.walkUp).length;
+  return { reg: ps.length - walk, walk, total: ps.length, cap: heatSize() + walkUpSlots() };
+}
+function heatHasRoom(n, walkUp, exceptId) {
+  const l = heatLoad(n, exceptId);
+  return l.total < l.cap && (walkUp || l.reg < heatSize());
+}
+const heatLoadText = (n, exceptId) => { const l = heatLoad(n, exceptId); return `${l.reg}/${heatSize()}` + (walkUpSlots() ? ` + ${l.walk}/${walkUpSlots()} walk-up` : ''); };
+// The heat with room for this kind of entry that has the fewest people (null if every heat is full).
+function nextFreeHeat(walkUp = false, exceptId) {
+  const n = settings().heats || 0; let best = null, bestN = Infinity;
+  for (let i = 1; i <= n; i++) { if (!heatHasRoom(i, walkUp, exceptId)) continue; const t = heatLoad(i, exceptId).total; if (t < bestN) { best = i; bestN = t; } }
+  return best;
 }
 
 // ---------- persistence
@@ -756,6 +771,7 @@ function viewCheckin() {
       if (ui.ci.filter === 'in' && !p.checkedIn) return false;
       if (ui.ci.filter === 'no_show' && p.status !== 'no_show') return false;
       if (ui.ci.division !== 'all' && p.division !== ui.ci.division) return false;
+      if (heatsOn() && ui.ci.heat && ui.ci.heat !== 'all' && !inHeat(p, ui.ci.heat)) return false;
       return !q || [p.number, p.name, p.title, p.character, p.series, p.materials].some(x => String(x || '').toLowerCase().includes(q));
     });
     listEl.replaceChildren(...(rows.length ? rows.map(p => h('div.item', { onclick: readOnly ? null : () => editParticipant(p), style: readOnly ? { cursor: 'default' } : null },
@@ -776,9 +792,16 @@ function viewCheckin() {
       h('div.tile', h('div.v', counts.in), h('div.l', 'Checked in')),
       h('div.tile', h('div.v', counts.waiting), h('div.l', 'Still expected')),
       h('div.tile', h('div.v', counts.no_show), h('div.l', 'No-shows'))),
+    heatsOn() ? h('div.heat-cap', Array.from({ length: st.heats }, (_, i) => {
+      const n = i + 1, l = heatLoad(n), full = l.total >= l.cap, regFull = l.reg >= heatSize();
+      return h('button.heat-tile', { class: (ui.ci.heat === n ? 'on ' : '') + (full ? 'full' : regFull ? 'regfull' : ''), title: 'Show only this heat', onclick: () => { ui.ci.heat = ui.ci.heat === n ? 'all' : n; render(); } },
+        h('div.k', heatLabel(n)), h('div.v', `${l.total}/${l.cap}`),
+        h('div.l', `${l.reg}/${heatSize()} registered` + (walkUpSlots() ? ` · ${l.walk}/${walkUpSlots()} walk-up` : '')),
+        h('div.bar', h('span', { style: { width: Math.min(100, l.total / l.cap * 100) + '%' } })));
+    })) : null,
     readOnly ? h('div.banner.info', h('span.tag', 'View only'), `You can see this contest's ${W.many} and results, but not change anything.`) : null,
     h('div.panel.stack',
-      h('div.row', h('div.grow', search), readOnly ? null : h('button.btn.primary', { onclick: () => editParticipant(null) }, isMakers() ? '+ Entry' : '+ Walk-in')),
+      h('div.row', h('div.grow', search), readOnly ? null : h('button.btn.primary', { onclick: () => editParticipant(null, heatsOn() ? { walkUp: true } : {}) }, isMakers() ? '+ Entry' : '+ Walk-in')),
       h('div.row.between',
         h('div.chips', chip('all', 'All'), chip('waiting', 'Not here yet'), chip('in', 'Checked in'), chip('no_show', 'No-show')),
         st.divisions?.length ? h('select', { style: { width: 'auto' }, onchange: e => { ui.ci.division = e.target.value; draw(); } },
@@ -795,17 +818,18 @@ const PART_FIELDS = {
   show: [['music', 'Music & sound cue', 'Track name, start at 0:42, fade at end…'], ['lighting', 'Lighting notes', 'Blue wash, blackout on final pose…'], ['pronunciation', 'Name pronunciation', 'e.g. AL-iss mo-ROH']],
   makers: [['number', 'Entry #'], ['title', 'Entry title', 'e.g. Mjolnir replica'], ['name', 'Maker', 'Name as credited'], ['materials', 'Materials & techniques', 'EVA foam, resin, 3D printing…']],
 };
-function editParticipant(p) {
+function editParticipant(p, defaults = {}) {
   const isNew = !p;
   const st = settings();
   const W = WORDS();
   const type = isMakers() ? 'makers' : 'cosplay';
-  p = p || { number: nextNumber(), division: st.divisions?.[0] || '' };
+  p = p || { number: nextNumber(), division: st.divisions?.[0] || '', ...defaults };
   const f = {};
   const field = (k, label, el) => h('label.field', h('span', label), f[k] = el);
   const inp = (k, ph = '') => h('input', { type: 'text', value: p[k] || '', placeholder: ph });
   const ta = k => h('textarea', { rows: 3 }, p[k] || '');
   const checkIn = h('input', { type: 'checkbox', checked: isNew ? true : !!p.checkedIn });
+  const walkUpBox = h('input', { type: 'checkbox', checked: !!p.walkUp });
   const statuses = isMakers() ? ['registered', 'checked_in', 'done', 'no_show'] : ['registered', 'checked_in', 'on_stage', 'done', 'no_show'];
   const status = h('select', statuses.map(s2 => h('option', { value: s2, selected: (p.status || 'registered') === s2 }, s2.replace('_', ' '))));
   const keys = [...PART_FIELDS[type].map(x => x[0]), 'division', 'judgeNotes', 'notes', 'contact', ...(isMakers() ? [] : ['music', 'lighting', 'pronunciation', 'intro'])];
@@ -813,7 +837,21 @@ function editParticipant(p) {
     h('div.form-grid',
       PART_FIELDS[type].map(([k, label, ph]) => field(k, label, inp(k, ph))),
       field('division', W.division, h('select', h('option', { value: '' }, '—'), (st.divisions || []).map(d => h('option', { value: d, selected: p.division === d }, d)))),
-      heatsOn() ? field('heat', 'Heat', h('select', h('option', { value: '' }, '—'), Array.from({ length: st.heats }, (_, i) => h('option', { value: i + 1, selected: (isNew ? nextFreeHeat() : p.heat) === i + 1 }, heatLabel(i + 1))))) : null,
+      heatsOn() ? field('heat', 'Heat', (() => {
+        const sel = h('select', h('option', { value: '' }, '—'));
+        const fill = () => {
+          const wu = walkUpBox.checked;
+          const want = sel.value ? Number(sel.value) : (isNew ? nextFreeHeat(wu) : p.heat);
+          sel.replaceChildren(h('option', { value: '' }, '—'), ...Array.from({ length: st.heats }, (_, i) => {
+            const n = i + 1, room = heatHasRoom(n, wu, p.id) || p.heat === n;
+            return h('option', { value: n, selected: want === n, disabled: !room && !manages() }, `${heatLabel(n)} — ${heatLoadText(n, p.id)}${room ? '' : ' (full)'}`);
+          }));
+        };
+        walkUpBox.addEventListener('change', fill);
+        fill();
+        return sel;
+      })()) : null,
+      heatsOn() ? h('label.check', walkUpBox, 'Walk-up (signed up on the day)') : null,
       isNew ? null : field('status', 'Status', status)),
     field('judgeNotes', isMakers() ? 'Notes shown to judges (build log, techniques, references)' : 'Notes shown to judges (build notes, references)', ta('judgeNotes')),
     field('notes', isMakers() ? 'Private staff notes (table number, fragile, pickup time…) — not shown to judges' : 'Private staff notes (accessibility, special needs…) — not shown to judges', ta('notes')),
@@ -834,7 +872,16 @@ function editParticipant(p) {
           const v = f[k].value.trim();
           if (isNew || v !== (p[k] || '')) patch[k] = v;
         }
-        if (f.heat) { const hv = f.heat.value ? Number(f.heat.value) : null; if (isNew || hv !== (p.heat ?? null)) patch.heat = hv; }
+        if (f.heat) {
+          const hv = f.heat.value ? Number(f.heat.value) : null, wu = walkUpBox.checked;
+          if (isNew || hv !== (p.heat ?? null)) patch.heat = hv;
+          if (isNew || wu !== !!p.walkUp) patch.walkUp = wu;
+          if (hv && (isNew || hv !== p.heat || wu !== !!p.walkUp) && !heatHasRoom(hv, wu, p.id)) {
+            const msg = `${heatLabel(hv)} is full (${heatLoadText(hv, p.id)}).`;
+            if (!manages()) { toast(msg + ' Pick another heat, or ask the contest lead.', 'bad'); return; }
+            if (!confirm(msg + ' Add anyway?')) return;
+          }
+        }
         if (isNew && !(isMakers() ? patch.title || patch.name : patch.name)) { toast(isMakers() ? 'Please enter an entry title or maker' : 'Please enter a name', 'bad'); return; }
         if (isNew) { patch.contestId = curId(); patch.checkedIn = checkIn.checked; patch.status = checkIn.checked ? 'checked_in' : 'registered'; }
         else if (f.status.value !== (p.status || 'registered')) {
@@ -843,7 +890,7 @@ function editParticipant(p) {
         }
         if (Object.keys(patch).length) mutate('participants', isNew ? newId() : p.id, patch);
         close();
-        if (isNew) toast(`Added ${partLabel(patch)}`, 'ok');
+        if (isNew) toast(`Added ${partLabel(patch)}` + (heatsOn() && !patch.heat ? ' with no heat (every heat is full). Pick one when a place opens up.' : ''), heatsOn() && !patch.heat ? 'bad' : 'ok');
       },
     }, isNew ? 'Add' : 'Save'),
   ]);
@@ -1714,6 +1761,8 @@ function viewSetup() {
   const notes = h('textarea', { rows: 6, placeholder: 'One per line, e.g. Exceptional electronics', oninput: keep('notes') }, ed.notes ?? (st.quickNotes || []).join('\n'));
   const heats = h('input', { type: 'number', min: 0, max: 12, value: ed.heats ?? (st.heats || 0), oninput: keep('heats') });
   const finalists = h('input', { type: 'number', min: 1, max: 50, value: ed.finalists ?? (st.finalists || 3), oninput: keep('finalists') });
+  const hsize = h('input', { type: 'number', min: 1, max: 500, value: ed.hsize ?? (st.heatSize ?? 14), oninput: keep('hsize') });
+  const walks = h('input', { type: 'number', min: 0, max: 100, value: ed.walks ?? (st.walkUps ?? 4), oninput: keep('walks') });
   const crits = criteria();
   const online = S.net === 'online';
 
@@ -1730,13 +1779,18 @@ function viewSetup() {
         h('label.field', h('span', 'Heats (0 = no heats)'), heats,
           h('span.small.muted', 'Split the first round into heats. Judges pick the heat they are scoring.')),
         h('label.field', h('span', 'Finalists from all heats combined'), finalists,
-          h('span.small.muted', 'The top scorers across every heat go to a finals round, scored again from zero.'))),
+          h('span.small.muted', 'The top scorers across every heat go to a finals round, scored again from zero.')),
+        h('label.field', h('span', 'Max contestants per heat'), hsize,
+          h('span.small.muted', 'Places for pre-registered and imported entries.')),
+        h('label.field', h('span', 'Extra walk-up slots per heat'), walks,
+          h('span.small.muted', 'Kept free for people who sign up on the day. Walk-ups can also use unused regular places.'))),
       h('label.field', h('span', 'Quick notes for judges (one per line)'), notes,
         h('span.small.muted', 'Judges tick these while scoring. Removing one here keeps any ticks already made.')),
       h('div', h('button.btn.primary', {
         onclick: () => {
           const patch = { name: name.value.trim() || st.name, divisions: divs.value.split(',').map(x => x.trim()).filter(Boolean), quickNotes: notes.value.split('\n').map(x => x.trim()).filter(Boolean),
-            heats: Math.max(0, Math.min(12, Math.round(Number(heats.value) || 0))), finalists: Math.max(1, Math.min(50, Math.round(Number(finalists.value) || 3))) };
+            heats: Math.max(0, Math.min(12, Math.round(Number(heats.value) || 0))), finalists: Math.max(1, Math.min(50, Math.round(Number(finalists.value) || 3))),
+            heatSize: Math.max(1, Math.min(500, Math.round(Number(hsize.value) || 14))), walkUps: Math.max(0, Math.min(100, Math.round(Number(walks.value) || 0))) };
           if (patch.heats < (st.heats || 0) && participants().some(p => p.heat > patch.heats) && !confirm(`Some entries are in heats above ${patch.heats}. They will show as "No heat" until you move them. Continue?`)) return;
           if (!isMakers()) Object.assign(patch, { stageSeconds: Number(secs.value) || 90, warnSeconds: Number(warn.value) || 0 });
           if (isAdmin() && type.value !== st.type) {
@@ -2051,10 +2105,11 @@ function editAccess(u, contests, call) {
 function importBox() {
   const makers = isMakers();
   const W = WORDS();
-  const ta = h('textarea', { rows: 6, placeholder: makers ? 'number,entry title,maker,category,materials\n1,Mjolnir replica,Sam Lee,Props,EVA foam' : 'number,name,character,series,division\n1,Jane Doe,Aloy,Horizon Zero Dawn,Novice', oninput: e => { ui.importText = e.target.value; } }, ui.importText);
+  const ta = h('textarea', { rows: 6, placeholder: makers ? 'number,entry title,maker,category,materials\n1,Mjolnir replica,Sam Lee,Props,EVA foam' : heatsOn() ? 'number,name,character,series,division,heat\n1,Jane Doe,Aloy,Horizon Zero Dawn,Novice,2' : 'number,name,character,series,division\n1,Jane Doe,Aloy,Horizon Zero Dawn,Novice', oninput: e => { ui.importText = e.target.value; } }, ui.importText);
   const file = h('input', { type: 'file', accept: '.csv,.tsv,.txt', onchange: async e => { ta.value = ui.importText = await e.target.files[0].text(); } });
   const preview = h('div.small.muted');
-  const COMMON = { number: 'number', '#': 'number', 'entry #': 'number', 'contestant #': 'number', 'judge notes': 'judgeNotes', judgenotes: 'judgeNotes', 'build notes': 'judgeNotes', notes: 'notes', 'staff notes': 'notes', contact: 'contact', email: 'contact', phone: 'contact', 'checked in': 'checkedIn', checkedin: 'checkedIn', division: 'division', category: 'division' };
+  const COMMON = { number: 'number', '#': 'number', 'entry #': 'number', 'contestant #': 'number', 'judge notes': 'judgeNotes', judgenotes: 'judgeNotes', 'build notes': 'judgeNotes', notes: 'notes', 'staff notes': 'notes', contact: 'contact', email: 'contact', phone: 'contact', 'checked in': 'checkedIn', checkedin: 'checkedIn', division: 'division', category: 'division',
+    heat: 'heat', 'heat #': 'heat', 'heat number': 'heat', 'heat no': 'heat', 'walk-up': 'walkUp', 'walk up': 'walkUp', walkup: 'walkUp', 'walk-in': 'walkUp', 'walk in': 'walkUp' };
   const MAP = makers
     ? { ...COMMON, entry: 'title', 'entry title': 'title', title: 'title', piece: 'title', maker: 'name', name: 'name', 'maker name': 'name', materials: 'materials', 'materials & techniques': 'materials', techniques: 'materials' }
     : { ...COMMON, entry: 'number', name: 'name', cosplayer: 'name', 'badge name': 'name', 'cosplay name': 'name', character: 'character', series: 'series', source: 'series', franchise: 'series',
@@ -2073,13 +2128,31 @@ function importBox() {
         if (!r.length) { toast('Nothing to import', 'bad'); return; }
         const existing = new Set(participants().map(p => String(p.number)));
         const dup = r.filter(o => o.number && existing.has(String(o.number))).length;
-        if (!confirm(`Import ${r.length} ${W.many} into ${settings().name}?${dup ? ` ${dup} have numbers that already exist (they'll be added as duplicates).` : ''}`)) return;
-        let n = parseInt(nextNumber());
+        const H = settings().heats || 0;
+        const yes = v => /^(y|yes|true|1|x)$/i.test(v || '');
+        const badHeat = H ? r.filter(o => o.heat && !(Number(o.heat) >= 1 && Number(o.heat) <= H && Number.isInteger(Number(o.heat)))).length : 0;
+        const noHeat = H ? r.filter(o => !o.heat).length : 0;
+        const notes = [dup ? `${dup} have numbers that already exist (they'll be added as duplicates).` : '',
+          badHeat ? `${badHeat} have a heat that isn't 1–${H}; they'll be placed automatically.` : '',
+          noHeat ? `${noHeat} have no heat; they'll go to the heat with the most room.` : '',
+          !H && r.some(o => o.heat) ? 'Heat numbers are ignored because this contest has no heats (set them in Contest settings first).' : ''].filter(Boolean);
+        if (!confirm(`Import ${r.length} ${W.many} into ${settings().name}?${notes.length ? '\n\n' + notes.join('\n') : ''}`)) return;
+        let n = parseInt(nextNumber()), over = new Map(), unplaced = 0;
         r.forEach(o => {
-          const ci = /^(y|yes|true|1|x)$/i.test(o.checkedIn || '');
-          mutate('participants', newId(), { ...o, contestId: curId(), number: o.number || String(n++), checkedIn: ci, status: ci ? 'checked_in' : 'registered' });
+          const ci = yes(o.checkedIn), wu = yes(o.walkUp);
+          const rec = { ...o, contestId: curId(), number: o.number || String(n++), checkedIn: ci, status: ci ? 'checked_in' : 'registered' };
+          delete rec.heat; delete rec.walkUp;
+          if (H) {
+            let hv = Number(o.heat);
+            if (!(Number.isInteger(hv) && hv >= 1 && hv <= H)) { hv = nextFreeHeat(wu); if (!hv) unplaced++; }
+            else if (!heatHasRoom(hv, wu)) over.set(hv, (over.get(hv) || 0) + 1);
+            Object.assign(rec, { heat: hv || null, walkUp: wu });
+          }
+          mutate('participants', newId(), rec); // applied locally at once, so the next row sees the updated heat counts
         });
-        ta.value = ui.importText = ''; toast(`Imported ${r.length} ${W.many}`, 'ok');
+        ta.value = ui.importText = '';
+        const warn = [...over].map(([hv, k]) => `${heatLabel(hv)} is over its limit by ${k}`).concat(unplaced ? [`${unplaced} couldn't be placed because every heat is full`] : []);
+        toast(`Imported ${r.length} ${W.many}` + (warn.length ? '. ' + warn.join('; ') + '.' : ''), warn.length ? 'bad' : 'ok');
       },
     }, 'Import')));
 }

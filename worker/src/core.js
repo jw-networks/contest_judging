@@ -330,6 +330,9 @@ export class Contest {
         // across all heats combined go on to a finals round that is scored again from zero.
         if (has('heats')) p.heats = Math.round(num(patch.heats, 0, 12, 0));
         if (has('finalists')) p.finalists = Math.round(num(patch.finalists, 1, 50, 3));
+        // Heat capacity: heatSize pre-registered places, plus walkUps places kept for walk-ups (enforced in the app).
+        if (has('heatSize')) p.heatSize = Math.round(num(patch.heatSize, 1, 500, 14));
+        if (has('walkUps')) p.walkUps = Math.round(num(patch.walkUps, 0, 100, 4));
         if (has('order')) p.order = num(patch.order, -1e6, 1e6, 0);
         if (has('archived')) p.archived = !!patch.archived;
         break;
@@ -351,6 +354,7 @@ export class Contest {
         if (has('order')) p.order = num(patch.order, -1e9, 1e9, 0);
         if (has('heat')) p.heat = patch.heat == null || patch.heat === '' ? null : Math.round(num(patch.heat, 1, 12, 1));
         if (has('finalist')) p.finalist = !!patch.finalist;
+        if (has('walkUp')) p.walkUp = !!patch.walkUp;
         if (has('finalOrder')) p.finalOrder = num(patch.finalOrder, -1e9, 1e9, 0);
         break;
       case 'scores':
