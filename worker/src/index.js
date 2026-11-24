@@ -117,7 +117,7 @@ export class ContestDB {
     this.env = env;
     this.gh = new GitHubFile(env, env.FETCH || ((...a) => fetch(...a))); // FETCH is only used by the local dev server's fake GitHub
     this.flushMs = Math.max(10, Number(env.FLUSH_SECONDS) || 30) * 1000;
-    this.contest = new Contest(this.storeAdapter(), { broadcast: (t, d) => this.broadcast(t, d) });
+    this.contest = new Contest(this.storeAdapter(), { broadcast: (t, d) => this.broadcast(t, d), local: !!env.LOCAL_MODE });
     this.initError = null;
     try { ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong')); } catch { /* older runtime */ }
     ctx.blockConcurrencyWhile(() => this.init());

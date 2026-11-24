@@ -49,5 +49,12 @@ GOOD TO KNOW
   - Optional cloud backup: set DATA_REPO (owner/repo) and DATA_REPO_TOKEN before starting to
     also copy the data to a private GitHub repo whenever the computer has internet.
 
-This is a separate copy from the online version of Spotlight: contests, accounts and scores
-are not shared between them.
+MOVING CONTESTS FROM AND TO THE ONLINE VERSION
+  This is a separate copy from the online version of Spotlight. To carry contests across,
+  use Admin -> Transfer contests on both sides:
+    1. Online, before the event: tick the contests and press "Download transfer file".
+    2. Here: "Choose transfer file...", check the preview, type IMPORT. Contests, entries,
+       photos, scores and the accounts (with their passwords) all come across.
+    3. After the event: download a transfer file here and load it online the same way.
+  Loading replaces those contests on the receiving side, so stop scoring on the other side
+  first. The file contains password hashes: keep it private and delete it afterwards.

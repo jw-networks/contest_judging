@@ -2042,6 +2042,7 @@ function viewAdmin() {
       accountsPanel(online)),
     githubPanel(online),
     CFG.local ? null : localDownloadPanel(),
+    transferPanel(online),
     h('div.panel.stack', h('h3', 'Backup'),
       h('div', h('button.btn', {
         disabled: !online,
@@ -2053,6 +2054,108 @@ function viewAdmin() {
           } catch { toast('Backup needs a connection to the server', 'bad'); }
         },
       }, 'Download full backup (no passwords)'))));
+}
+
+// ============================================================ transfer files (online <-> local server)
+const blobToB64 = b => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.onerror = rej; r.readAsDataURL(b); });
+const b64ToBytes = b64 => Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+const slug = t => String(t || 'spotlight').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'spotlight';
+
+function transferPanel(online) {
+  const all = Object.values(S.data.contests).filter(c => !c.deleted).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  const t = ui.transfer ||= { pick: Object.fromEntries(all.map(c => [c.id, true])), photos: true };
+  const status = h('p.small.muted');
+  const fileIn = h('input', { type: 'file', accept: '.json,application/json', style: { display: 'none' }, onchange: e => { const f = e.target.files[0]; e.target.value = ''; if (f) loadTransferFile(f); } });
+  const exportIt = async () => {
+    const cids = all.filter(c => t.pick[c.id]).map(c => c.id);
+    if (!cids.length) return toast('Pick at least one contest', 'bad');
+    try {
+      status.textContent = 'Preparing…';
+      const f = await api('/api/transfer?contests=' + encodeURIComponent(cids.join(',')), null, { token: S.account.token, timeout: 60000 });
+      if (t.photos && f.photoIds?.length) {
+        f.photos = {};
+        let n = 0;
+        for (const id of f.photoIds) {
+          status.textContent = `Adding photos… ${++n} of ${f.photoIds.length}`;
+          const r = await fetch(serverBase() + '/api/photos/' + encodeURIComponent(id), { headers: { Authorization: 'Bearer ' + S.account.token } });
+          if (r.ok) { const b = await r.blob(); f.photos[id] = { type: b.type || 'image/jpeg', b64: await blobToB64(b) }; }
+        }
+      }
+      download(`spotlight-transfer-${slug(f.eventName || f.data.contests[cids[0]]?.name)}-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(f), 'application/json');
+      status.textContent = `Downloaded ${cids.length} contest${cids.length === 1 ? '' : 's'}, ${Object.keys(f.data.participants).length} entries, ${Object.keys(f.data.scores).length} score sheets${f.photos ? `, ${Object.keys(f.photos).length} photos` : ''}.`;
+    } catch (e) { status.textContent = ''; toast(e.message || 'Export failed', 'bad'); }
+  };
+  return h('div.panel.stack', h('div.row.between', h('h3', 'Transfer contests'), online ? null : h('span.badge.draft', 'Needs connection')),
+    h('p.small.muted', CFG.local
+      ? 'Move contests between this local server and the online version. Load the file you downloaded online to bring your setup here, and download one here after the event to take the results back.'
+      : 'Move contests between the online version and a local server. Download a file here to set up a local server for the event, and load the file from the local server afterwards to bring the results back.'),
+    h('div.transfer-cols',
+      h('div.stack',
+        h('b', '1. Download a transfer file'),
+        h('div.check-list', all.map(c => h('label.check', h('input', { type: 'checkbox', checked: !!t.pick[c.id], onchange: e => { t.pick[c.id] = e.target.checked; } }), c.name, c.archived ? h('span.small.muted', ' (archived)') : null))),
+        h('label.check', h('input', { type: 'checkbox', checked: t.photos, onchange: e => { t.photos = e.target.checked; } }), 'Include reference photos (bigger file)'),
+        h('div', h('button.btn.primary', { disabled: !online, onclick: exportIt }, 'Download transfer file')),
+        h('p.small.muted', 'The file includes the accounts that work on these contests, with their passwords (scrambled, not readable), so everyone signs in the same way on the other server. Keep it private and delete it when you\'re done.')),
+      h('div.stack',
+        h('b', '2. Load a transfer file'),
+        h('p.small.muted', 'Replaces the contests you pick with the copies in the file. Other contests here are not touched. You see exactly what will change first.'),
+        h('div', h('button.btn', { disabled: !online, onclick: () => fileIn.click() }, 'Choose transfer file…'), fileIn))),
+    status);
+}
+
+async function loadTransferFile(fileObj) {
+  let f;
+  try { f = JSON.parse(await fileObj.text()); } catch { return toast('That file isn\'t a Spotlight transfer file', 'bad'); }
+  if (f?.kind !== 'spotlight-transfer' || !f.data?.contests) return toast(f?.format ? 'That\'s a backup, not a transfer file. Download a transfer file from Admin → Transfer contests.' : 'That file isn\'t a Spotlight transfer file', 'bad');
+  const cids = (f.contests || Object.keys(f.data.contests)).filter(cid => f.data.contests[cid]);
+  const pick = Object.fromEntries(cids.map(cid => [cid, true]));
+  const count = (coll, cid) => Object.values(f.data[coll] || {}).filter(r => r.contestId === cid && !r.deleted).length;
+  const here = cid => { const c = S.data.contests[cid]; return c && !c.deleted ? c : null; };
+  const hereCount = (coll, cid) => Object.values(S.data[coll]).filter(r => r.contestId === cid && !r.deleted).length;
+  const known = new Set(Object.values(S.data.users).map(u => String(u.username).toLowerCase()));
+  const newAccounts = f.users.filter(u => !known.has(String(u.username).toLowerCase()));
+  const confirmIn = h('input', { type: 'text', placeholder: 'Type IMPORT', autocomplete: 'off' });
+  const progress = h('p.small.muted');
+  const go = h('button.btn.primary', {}, 'Load contests');
+  const rows = cids.map(cid => {
+    const c = f.data.contests[cid], ex = here(cid);
+    return h('label.check.transfer-row', h('input', { type: 'checkbox', checked: true, onchange: e => { pick[cid] = e.target.checked; } }),
+      h('div', h('b', c.name), h('div.small.muted', `${count('participants', cid)} entries, ${count('scores', cid)} score sheets in the file`),
+        ex ? h('div.small', { style: { color: 'var(--warn)' } }, `Replaces “${ex.name}” here (${hereCount('participants', cid)} entries, ${hereCount('scores', cid)} score sheets)`)
+          : h('div.small', { style: { color: 'var(--ok)' } }, 'New contest here')));
+  });
+  const close = openModal('Load transfer file', h('div.stack',
+    h('p.small.muted', `From the ${f.source === 'local' ? 'local server' : 'online version'}${f.eventName ? ` · ${f.eventName}` : ''} · exported ${fmtTime(Date.parse(f.exportedAt))}`),
+    h('div.stack', rows),
+    h('p.small', `${f.users.length} account${f.users.length === 1 ? '' : 's'} in the file. `,
+      newAccounts.length ? h('span', `${newAccounts.length} will be added here with the password they had there: ${newAccounts.map(u => u.username).join(', ')}. `) : 'All of them already exist here. ',
+      'Existing accounts keep their password here and get the roles from the file for these contests.'),
+    f.photos ? h('p.small.muted', `${Object.keys(f.photos).length} photos included.`) : f.photoIds?.length ? h('p.small.muted', 'Photos were not included in this file; entries will show no photos.') : null,
+    h('div.banner.warn', h('span.tag', 'Replaces'), h('span.grow', 'Everything in the ticked contests here is replaced with the file\'s copy, including scores entered here. Make sure no one is still scoring them on this server.')),
+    h('label.field', h('span', 'Type IMPORT to confirm'), confirmIn),
+    progress), [h('button.btn.ghost', { onclick: () => close() }, 'Cancel'), go]);
+  go.onclick = async () => {
+    const chosen = cids.filter(cid => pick[cid]);
+    if (!chosen.length) return toast('Tick at least one contest', 'bad');
+    if (confirmIn.value.trim().toUpperCase() !== 'IMPORT') return toast('Type IMPORT to confirm', 'bad');
+    go.disabled = true;
+    try {
+      progress.textContent = 'Loading contests…';
+      const { photos, ...rest } = f;
+      const r = await api('/api/transfer/import', { file: rest, contests: chosen, confirm: 'IMPORT' }, { token: S.account.token, timeout: 120000 });
+      const need = (r.photosNeeded || []).filter(id => photos?.[id]);
+      let n = 0, failed = 0;
+      for (const id of need) {
+        progress.textContent = `Copying photos… ${++n} of ${need.length}`;
+        const res = await fetch(serverBase() + '/api/transfer/photo?id=' + encodeURIComponent(id), { method: 'PUT', headers: { Authorization: 'Bearer ' + S.account.token, 'Content-Type': photos[id].type }, body: b64ToBytes(photos[id].b64) }).catch(() => null);
+        if (!res?.ok) failed++;
+      }
+      clearPhotoCache?.();
+      close();
+      await sync({ full: true });
+      toast(`Loaded ${r.names}: ${r.entries} entries, ${r.scores} score sheets` + (r.accountsAdded ? `, ${r.accountsAdded} new account${r.accountsAdded === 1 ? '' : 's'}` : '') + (need.length ? `, ${need.length - failed} photos` : '') + (failed ? ` (${failed} photos failed)` : '') + '.', failed ? 'bad' : 'ok');
+    } catch (e) { go.disabled = false; progress.textContent = ''; toast(e.message || 'Import failed', 'bad'); }
+  };
 }
 
 function contestsPanel() {

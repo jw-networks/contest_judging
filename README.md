@@ -101,6 +101,16 @@ Spotlight can also run entirely on a laptop or mini-PC at the venue. Every table
 
 Data lives in `spotlight-data/` next to the start files: `spotlight.db` (live) and `backups/` (a full copy every 5 minutes and on shutdown, last 48 kept). To move it, stop the server and copy that folder. There's also a Dockerfile in the zip for mini-PCs and NAS boxes. Optional: set `DATA_REPO` and `DATA_REPO_TOKEN` to also copy the data to a private GitHub repo whenever the computer has internet (it uses `local-db.json`, so it never overwrites the cloud copy).
 
+### Moving contests between the online version and a local server
+
+**Admin → Transfer contests** works the same on both:
+
+1. **Before the event (online):** tick the contests, keep *Include reference photos* on, and press **Download transfer file**.
+2. **On the local server:** **Choose transfer file…**, check the preview, type `IMPORT`. Contests, criteria, heats, entries, photos, scores and quick notes arrive, and the accounts that work on them come along with their passwords, so everyone signs in as usual.
+3. **After the event (local server):** download a transfer file there, and load it online the same way to bring the results back.
+
+Loading replaces the ticked contests on that server with the file's copy (other contests are untouched), so stop scoring on the other side first. Accounts are matched by username: existing ones keep their password and get the file's roles for those contests; missing ones are created. The file contains password hashes (not readable passwords): keep it private and delete it afterwards. Only admins can download or load transfer files.
+
 From the repo: `npm run local` (same thing). The zip is rebuilt automatically by `.github/workflows/local-server.yml` on every push.
 
 **Network notes:** use a normal (not "guest") Wi-Fi so devices can see each other, and give the server a fixed address on the router if you can. The server only answers to its IP address, `localhost`, `.local`/`.lan` names, the computer's own name, or names you add with `SPOTLIGHT_HOSTS`, and only to pages it served itself. Over plain http, browsers don't keep an offline copy of the app shell, so keep the app open on each tablet; scores are saved on the tablet either way. Put `cert.pem` and `key.pem` in `spotlight-data/` to serve https instead.

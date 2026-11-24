@@ -24,6 +24,7 @@ const PBKDF2_ITER = 50000; // Cloudflare caps PBKDF2 at 100k; 50k keeps logins i
 const AUDIT_CHUNK = 500;
 export const SCHEMA = 2;
 export const SNAPSHOT_FORMAT = 'contest-judging/1';
+export const TRANSFER_KIND = 'spotlight-transfer';
 
 export const DEFAULTS = {
   cosplay: {
@@ -90,9 +91,9 @@ const num = (v, min, max, dflt) => {
 export function json(status, data, headers = {}) {
   return new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...headers } });
 }
-async function readBody(req) {
+async function readBody(req, max = 5e6) {
   const text = await req.text();
-  if (text.length > 5e6) throw new HttpError(413, 'Too large');
+  if (text.length > max) throw new HttpError(413, 'Too large');
   if (!text) return {};
   try { return JSON.parse(text); } catch { throw new HttpError(400, 'Invalid JSON'); }
 }
@@ -228,6 +229,93 @@ export class Contest {
   }
 
   /** Full database for the GitHub mirror. Sessions are never exported. */
+  /**
+   * Replace the chosen contests with the ones in a transfer file. Other contests are untouched.
+   * Accounts are matched by username: an existing account keeps its password here and gets the file's
+   * role in those contests; a missing account is created with the password it had on the other server.
+   * Scores are re-keyed to this server's account ids. Records of those contests that aren't in the file
+   * are marked deleted so every device drops them.
+   */
+  async importContests(file, chosen, actor) {
+    const db = this.db;
+    if (!file || file.kind !== TRANSFER_KIND || !file.data || !Array.isArray(file.users)) throw new HttpError(400, 'This is not a Spotlight transfer file');
+    if ((file.version || 1) > 1) throw new HttpError(400, 'This transfer file is from a newer version of Spotlight. Update this server first.');
+    const cids = (Array.isArray(chosen) && chosen.length ? chosen : file.contests || []).filter(cid => file.data.contests?.[cid]);
+    if (!cids.length) throw new HttpError(400, 'Choose at least one contest from the file');
+    const now = Date.now();
+    // 1. accounts
+    const byName = new Map(Object.values(db.users).map(u => [String(u.username).toLowerCase(), u]));
+    const map = {}; let added = 0, updated = 0;
+    for (const fu of file.users) {
+      if (!fu || !fu.username || !/^[a-f0-9]+$/i.test(fu.salt || '') || !fu.passHash) continue;
+      let u = byName.get(String(fu.username).toLowerCase());
+      if (!u) {
+        const id = /^[\w-]{4,40}$/.test(fu.id) && !db.users[fu.id] ? fu.id : newId();
+        u = db.users[id] = { id, username: str(fu.username, 40).toLowerCase(), displayName: str(fu.displayName || fu.username, 80), role: fu.role === 'admin' ? 'admin' : 'member', contests: {},
+          salt: fu.salt, passHash: fu.passHash, iter: Number(fu.iter) || PBKDF2_ITER, active: fu.active !== false, mustChangePassword: !!fu.mustChangePassword, createdAt: now };
+        byName.set(u.username, u); added++;
+      }
+      map[fu.id] = u.id;
+    }
+    const remap = id => map[id] || id;
+    // Roles in the imported contests come from the file (admins here stay admins).
+    for (const u of Object.values(db.users)) {
+      const fu = file.users.find(x => map[x.id] === u.id);
+      const before = JSON.stringify(u.contests || {});
+      const contests = { ...(u.contests || {}) };
+      for (const cid of cids) {
+        const r = fu && fu.contests && fu.contests[cid];
+        if (r && CONTEST_ROLES.includes(r)) contests[cid] = r; else delete contests[cid];
+      }
+      if (JSON.stringify(contests) !== before || !u.rev) { u.contests = contests; u.rev = this.bump(); updated++; }
+    }
+    this.dirty.add('users');
+    // 2. contest data
+    const counts = { entries: 0, scores: 0 };
+    const photos = [], dropPhotos = [];
+    for (const cid of cids) {
+      const fc = file.data.contests[cid];
+      const incoming = {
+        criteria: Object.values(file.data.criteria || {}).filter(r => r.contestId === cid),
+        participants: Object.values(file.data.participants || {}).filter(r => r.contestId === cid),
+        scores: Object.values(file.data.scores || {}).filter(r => r.contestId === cid).map(r => {
+          const judgeId = remap(r.judgeId);
+          return { ...r, judgeId, id: r.participantId + '__' + judgeId + (r.round === 'final' ? '__final' : ''), ...(r.updatedBy ? { updatedBy: remap(r.updatedBy) } : {}) };
+        }),
+      };
+      for (const coll of ['criteria', 'participants', 'scores']) {
+        const keep = new Set(incoming[coll].map(r => r.id));
+        // drop what this server had for the contest and the file doesn't
+        for (const r of Object.values(db.data[coll])) if (r.contestId === cid && !keep.has(r.id) && !r.deleted) {
+          if (coll === 'participants' && r.photos?.length) dropPhotos.push(...r.photos.map(x => 'photo:' + x));
+          db.data[coll][r.id] = { id: r.id, contestId: cid, ...(coll === 'scores' ? { participantId: r.participantId, judgeId: r.judgeId } : {}), deleted: true, updatedAt: now, rev: this.bump() };
+        }
+        for (const r of incoming[coll]) db.data[coll][r.id] = { ...r, ...(coll === 'participants' && r.updatedBy ? { updatedBy: remap(r.updatedBy) } : {}), rev: this.bump() };
+        this.dirty.add('c:' + coll);
+      }
+      db.data.contests[cid] = { ...fc, id: cid, deleted: false, rev: this.bump() };
+      db.data.stage[cid] = { ...(file.data.stage?.[cid] || { id: cid, contestId: cid, state: 'idle' }), rev: this.bump() };
+      this.dirty.add('c:contests'); this.dirty.add('c:stage');
+      this.flags.stages.add(cid);
+      counts.entries += incoming.participants.filter(p => !p.deleted).length;
+      counts.scores += incoming.scores.filter(x => !x.deleted).length;
+      for (const p of incoming.participants) if (!p.deleted) photos.push(...(p.photos || []));
+    }
+    // 3. event name (only fills an empty one) and the contests' history
+    if (file.eventName && !db.data.settings.event?.name) { db.data.settings.event = { ...(db.data.settings.event || {}), id: 'event', name: str(file.eventName, 120), rev: this.bump() }; this.dirty.add('c:settings'); }
+    const seen = new Set(db.audit.map(a => a.id));
+    for (const a of file.audit || []) if (a && cids.includes(a.contestId) && !seen.has(a.id)) {
+      db.audit.push({ ...a, userId: remap(a.userId), rev: this.bump() });
+      this.dirty.add('audit:' + Math.floor((db.audit.length - 1) / AUDIT_CHUNK));
+    }
+    db.audit.sort((a, b) => (a.ts || 0) - (b.ts || 0));
+    for (let i = 0; i <= Math.floor((db.audit.length - 1) / AUDIT_CHUNK); i++) this.dirty.add('audit:' + i);
+    if (dropPhotos.length) await this.store.delete(dropPhotos);
+    const names = cids.map(cid => file.data.contests[cid].name).join(', ');
+    for (const cid of cids) this.audit(actor, 'data.import', { contestId: cid, label: `Loaded ${file.data.contests[cid].name} from a transfer file (${file.source || 'other'} server, exported ${file.exportedAt})` });
+    return { contests: cids, names, entries: counts.entries, scores: counts.scores, accountsAdded: added, accountsUpdated: updated, photosNeeded: photos };
+  }
+
   snapshot() {
     const { rev, schema, data, users, audit } = this.db;
     return { format: SNAPSHOT_FORMAT, schema, exportedAt: new Date().toISOString(), rev, data, users, audit };
@@ -863,6 +951,50 @@ export class Contest {
         return json(200, { user: this.publicUser(db.users[id], isAdminActor ? undefined : [cid]) });
       }
       throw new HttpError(405, 'Method not allowed');
+    }
+
+    // ---------- transfer files: move whole contests between servers (online <-> local network server)
+    // Export: everything for the chosen contests, with the accounts that work on them INCLUDING password
+    // hashes (so people sign in with the same passwords). Photos are fetched and added by the app.
+    if (route === 'GET /api/transfer') {
+      await this.requireUser(req, 'admin');
+      const want = (url.searchParams.get('contests') || '').split(',').filter(Boolean);
+      const cids = Object.values(db.data.contests).filter(c => !c.deleted && (!want.length || want.includes(c.id))).map(c => c.id);
+      const pick = coll => Object.fromEntries(Object.entries(db.data[coll]).filter(([, r]) => cids.includes(r.contestId) && !r.deleted));
+      const scorers = new Set(Object.values(db.data.scores).filter(x => cids.includes(x.contestId)).map(x => x.judgeId));
+      const users = Object.values(db.users).filter(u => u.role === 'admin' || scorers.has(u.id) || cids.some(cid => (u.contests || {})[cid]))
+        .map(({ id, username, displayName, role, contests, active, mustChangePassword, salt, passHash, iter }) =>
+          ({ id, username, displayName, role, contests: Object.fromEntries(Object.entries(contests || {}).filter(([cid]) => cids.includes(cid))), active, mustChangePassword: !!mustChangePassword, salt, passHash, iter }));
+      const data = {
+        contests: Object.fromEntries(cids.map(cid => [cid, db.data.contests[cid]])),
+        criteria: pick('criteria'), participants: pick('participants'), scores: pick('scores'),
+        stage: Object.fromEntries(cids.filter(cid => db.data.stage[cid]).map(cid => [cid, db.data.stage[cid]])),
+      };
+      const photoIds = Object.values(data.participants).flatMap(p => p.photos || []);
+      return new Response(JSON.stringify({
+        kind: TRANSFER_KIND, version: 1, schema: db.schema, exportedAt: new Date().toISOString(), source: this.hooks.local ? 'local' : 'online',
+        eventName: db.data.settings.event?.name || '', contests: cids, data, users,
+        audit: db.audit.filter(a => cids.includes(a.contestId)), photoIds,
+      }), { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+    }
+    if (route === 'POST /api/transfer/import') {
+      const admin = await this.requireUser(req, 'admin');
+      const body = await readBody(req, 30_000_000);
+      if (body.confirm !== 'IMPORT') throw new HttpError(400, 'Confirmation missing');
+      return json(200, await this.importContests(body.file, body.contests, admin));
+    }
+    // Photos for a transfer: raw bytes, one at a time, for photos the imported entries already list.
+    if (route === 'PUT /api/transfer/photo') {
+      await this.requireUser(req, 'admin');
+      const id = url.searchParams.get('id') || '';
+      const part = Object.values(db.data.participants).find(p => !p.deleted && (p.photos || []).includes(id));
+      if (!/^[\w-]+$/.test(id) || !part) throw new HttpError(404, 'No imported entry uses this photo');
+      const type = (req.headers.get('Content-Type') || '').split(';')[0];
+      if (!['image/jpeg', 'image/png', 'image/webp'].includes(type)) throw new HttpError(415, 'Photos must be JPEG, PNG or WebP');
+      const buf = new Uint8Array(await req.arrayBuffer());
+      if (!buf.length || buf.length > MAX_PHOTO_BYTES) throw new HttpError(413, 'Photo missing or too large');
+      await this.store.put({ ['photo:' + id]: { id, contestId: part.contestId, participantId: part.id, type, data: buf, bytes: buf.length, createdAt: Date.now(), by: 'transfer' } });
+      return json(200, { ok: true });
     }
 
     if (route === 'GET /api/backup') {

@@ -550,3 +550,9 @@ tr.click:hover td { background: var(--panel-2); }
 .local-addr { display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: var(--panel-3); border-left: 3px solid var(--cyan); }
 .local-addr code { flex: 1; font-size: 18px; font-weight: 700; color: var(--text); word-break: break-all; }
 ol.steps { margin: 0; padding-left: 1.3rem; } ol.steps li { margin: .2rem 0; }
+
+/* Transfer files */
+.transfer-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px; }
+.check-list { display: grid; gap: 4px; }
+.transfer-row { align-items: flex-start; padding: 8px 10px; background: var(--panel-3); }
+.transfer-row input { margin-top: 4px; }
