@@ -1198,6 +1198,58 @@ function scoreTotal(sc, crits = criteria()) {
 }
 const maxTotal = (crits = criteria()) => crits.reduce((a, c) => a + c.max * (c.weight ?? 1), 0);
 
+// The signed-in judge's own standings, from their own scores only (drafts included), ranked within each division.
+// Ties share a place (1, 2, 2, 4). Returns Map participantId -> { rank, of, division, total, tied }.
+function myRanking(list, crits = criteria()) {
+  const groups = new Map();
+  for (const p of list) {
+    const sc = S.data.scores[scoreId(p.id)];
+    if (!sc || sc.deleted) continue;
+    const t = scoreTotal(sc, crits);
+    if (!t.filled) continue;
+    const d = p.division || '';
+    if (!groups.has(d)) groups.set(d, []);
+    groups.get(d).push({ p, total: t.total });
+  }
+  const out = new Map();
+  for (const [d, rows] of groups) {
+    rows.sort((a, b) => b.total - a.total);
+    rows.forEach((r, i) => {
+      const rank = i && r.total === rows[i - 1].total ? out.get(rows[i - 1].p.id).rank : i + 1;
+      out.set(r.p.id, { rank, of: rows.length, division: d, total: r.total, tied: rows.filter(x => x.total === r.total).length > 1 });
+    });
+  }
+  return out;
+}
+const ordinal = n => n + (n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] || 'th');
+
+function judgeItem(p, { crits, stg, offline, rankInfo, inRanking }) {
+  const sc = S.data.scores[scoreId(p.id)];
+  const live = sc && !sc.deleted;
+  return h('div.item', { class: p.id === ui.judgeSel ? 'sel' : '', onclick: () => goJudge(p.id) },
+    rankInfo ? h('div.num.rank', { title: `Your ${ordinal(rankInfo.rank)} place` }, (rankInfo.tied ? '=' : '') + rankInfo.rank) : h('div.num', { class: inRanking ? 'unranked' : '' }, inRanking ? '–' : (p.number || '–')),
+    h('div.who', h('div.n', (rankInfo || inRanking) && p.number ? h('span.muted', `#${p.number} `) : null, p.title || p.name), h('div.c', partSub(p))),
+    !isMakers() && p.id === stg.participantId ? h('span.badge.on_stage', offline ? 'last on stage' : 'on stage') : null,
+    live && sc.submitted ? h('span.badge.submitted', (rankInfo ? '' : 'Done ') + fmt1(scoreTotal(sc, crits).total))
+      : live && scoreTotal(sc, crits).filled ? h('span.badge.draft', rankInfo ? 'draft ' + fmt1(scoreTotal(sc, crits).total) : 'draft') : null);
+}
+
+function judgeRankingList(list, ctx) {
+  const ranks = myRanking(list, ctx.crits);
+  if (!ranks.size) return h('p.muted', `Your ranking fills in as you score. It only uses your own scores, and only you can see it.`);
+  const divs = [...new Set(list.map(p => p.division || ''))];
+  const order = (st => [...st.divisions || [], ...divs.filter(d => !(st.divisions || []).includes(d))])(settings());
+  const many = new Set([...ranks.values()].map(r => r.division)).size > 1;
+  const unscored = list.filter(p => !ranks.has(p.id));
+  return h('div',
+    order.filter(d => [...ranks.values()].some(r => r.division === d)).map(d => {
+      const rows = list.filter(p => ranks.get(p.id)?.division === d).sort((a, b) => ranks.get(a.id).rank - ranks.get(b.id).rank || ranks.get(b.id).total - ranks.get(a.id).total);
+      return h('div', many || d ? h('div.rank-div', d || 'No division') : null, h('div.list', rows.map(p => judgeItem(p, { ...ctx, rankInfo: ranks.get(p.id) }))));
+    }),
+    unscored.length ? h('div', h('div.rank-div', 'Not scored yet'), h('div.list', unscored.map(p => judgeItem(p, { ...ctx, inRanking: true })))) : null,
+    h('p.small.muted', { style: { marginTop: '.6rem' } }, 'Only your own scores, including drafts. Final results average all judges, so they can differ.'));
+}
+
 function viewJudge() {
   const st = settings();
   const crits = criteria();
@@ -1221,15 +1273,12 @@ function viewJudge() {
       h('button.btn.primary', { onclick: () => goJudge(onStage.id) }, 'Score now')) : null,
     h('div.grid.cols-2',
       h('div.panel', h('div.row.between', h('h3', WORDS().Many), h('span.muted.small', `${scored}/${list.length} submitted`)),
-        h('div.list', list.length ? list.map(p => {
-          const sc = S.data.scores[scoreId(p.id)];
-          const live = sc && !sc.deleted;
-          return h('div.item', { class: p.id === ui.judgeSel ? 'sel' : '', onclick: () => goJudge(p.id) },
-            h('div.num', p.number || '–'),
-            h('div.who', h('div.n', p.title || p.name), h('div.c', partSub(p))),
-            !isMakers() && p.id === stg.participantId ? h('span.badge.on_stage', offline ? 'last on stage' : 'on stage') : null,
-            live && sc.submitted ? h('span.badge.submitted', 'Done ' + fmt1(scoreTotal(sc, crits).total)) : live && scoreTotal(sc, crits).filled ? h('span.badge.draft', 'draft') : null);
-        }) : h('p.muted', `${WORDS().Many} appear here once they are checked in.`))),
+        list.length ? h('div.seg.judge-tabs', { role: 'tablist' },
+          [['order', isMakers() ? 'Entry order' : 'Running order'], ['rank', 'My ranking']].map(([k, label]) =>
+            h('button', { type: 'button', role: 'tab', class: (ui.judgeTab || 'order') === k ? 'on' : '', 'aria-selected': (ui.judgeTab || 'order') === k ? 'true' : 'false', onclick: () => { ui.judgeTab = k; render(); } }, label))) : null,
+        !list.length ? h('p.muted', `${WORDS().Many} appear here once they are checked in.`)
+          : ui.judgeTab === 'rank' ? judgeRankingList(list, { crits, stg, offline })
+          : h('div.list', list.map(p => judgeItem(p, { crits, stg, offline })))),
       sel ? scoreForm(sel, crits, locked, list) : h('div.panel.muted', `Pick ${isMakers() ? 'an entry' : 'a contestant'} to score.`)));
 }
 
@@ -1286,7 +1335,8 @@ function scoreForm(p, crits, locked, list) {
     quickNotesPicker(live, locked, set),
     h('div', { style: { marginTop: '1rem' } }, comment),
     h('div.total-bar',
-      h('div', h('div.small.muted', 'Total'), h('div.t', fmt1(total), h('span.muted', { style: { fontSize: '1rem' } }, ` / ${maxTotal(crits)}`))),
+      h('div', h('div.small.muted', 'Total'), h('div.t', fmt1(total), h('span.muted', { style: { fontSize: '1rem' } }, ` / ${maxTotal(crits)}`)),
+        (() => { const r = myRanking(list, crits).get(p.id); return r ? h('div.small.my-rank', { title: 'From your own scores only' }, `Your ${r.tied ? 'joint ' : ''}${ordinal(r.rank)} of ${r.of}${r.division ? ' in ' + r.division : ''}`) : null; })()),
       locked ? (next ? h('button.btn.big', { onclick: () => goJudge(next.id) }, 'Next →') : null) : live?.submitted
         ? h('div.row', { style: { justifyContent: 'flex-end' } },
           h('div.small.muted', { style: { textAlign: 'right' } }, 'Submitted. You can still change', h('br'), 'scores until scoring is locked.'),

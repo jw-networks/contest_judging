@@ -476,3 +476,16 @@ tr.click:hover td { background: var(--panel-2); }
 .danger-zone { border-top-color: var(--bad); }
 .danger-zone h3 { color: #ff9da0; }
 .danger-zone h3::after { background: rgba(229, 72, 77, .3); }
+
+/* Judge: running order / my ranking */
+.judge-tabs { display: flex; gap: 2px; margin: .5rem 0 .6rem; }
+.judge-tabs button {
+  flex: 1; min-height: 42px; cursor: pointer; border: 0; border-top: 2px solid var(--line-2);
+  background: var(--panel-3); color: var(--muted); font: inherit; font-weight: 800; font-size: 13px; letter-spacing: .1em; text-transform: uppercase;
+}
+.judge-tabs button:hover { color: var(--text); border-top-color: var(--cyan); }
+.judge-tabs button.on { background: var(--teal); color: #fff; border-top-color: var(--cyan); }
+.item .num.rank { color: var(--cyan); }
+.rank-div { margin: .8rem 0 .3rem; font-size: 12px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+.my-rank { margin-top: 2px; color: var(--cyan); font-weight: 700; }
+.item .num.unranked { color: var(--dim); }
