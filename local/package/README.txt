@@ -8,12 +8,15 @@ web browser. Scores, check-in, photos and the stage clock all sync through that 
 WHAT YOU NEED
   - A Windows, Mac or Linux computer that stays on during the event, on the event Wi-Fi.
     Plug it in to power and turn off sleep.
-  - Node.js, free from https://nodejs.org (choose the LTS version; 22.13 or newer).
+  - Nothing to install if you downloaded the version for your computer: Node.js (the program
+    that runs the server) is included in the "node" folder. With the small download, install
+    Node.js 22.13 or newer from https://nodejs.org first.
   - A Wi-Fi network. It doesn't need internet. A travel router works well.
     Avoid "guest" networks: they often stop devices from seeing each other.
 
 START IT
   Windows:  double-click  "Start Spotlight (Windows).bat"
+            If Windows SmartScreen says it protected your PC, click More info, then Run anyway.
             If Windows asks whether Node.js may use the network, tick Private networks, Allow.
   Mac:      double-click  "Start Spotlight (Mac).command"
             The first time, macOS may refuse to open it: right-click it, choose Open, then Open.

@@ -33,13 +33,32 @@ jobs:
           for i in $(seq 1 20); do curl -fs http://127.0.0.1:8799/local-info >/dev/null && break; sleep 0.5; done
           curl -fs -X POST http://127.0.0.1:8799/api/login -H 'Content-Type: application/json' -d '{"username":"admin","password":"smoke-test-pw"}' | grep -q token
           kill $PID; sleep 2; ls /tmp/sl/backups | grep -q shutdown
-      - name: Build zip
+      - name: Build zip (needs Node.js installed)
         run: python3 local/build-zip.py
+      - name: Download official Node.js for each system (checksums verified)
+        run: python3 local/fetch-node.py
+      - name: Build zips with Node.js included
+        run: for t in windows mac-arm64 mac-x64 linux-x64 linux-arm64; do python3 local/build-zip.py --bundle-node $t; done
+      - name: Check the Linux download starts with its own Node.js
+        run: |
+          mkdir -p /tmp/b && cd /tmp/b && unzip -q "$GITHUB_WORKSPACE/dist/spotlight-local-server-linux-x64.zip"
+          cd spotlight-local-server && env -i HOME=/tmp PATH=/usr/bin:/bin PORT=8798 ADMIN_PASSWORD=smoke-test-pw ./start-linux.sh > /tmp/b/log.txt 2>&1 &
+          for i in $(seq 1 20); do curl -fs http://127.0.0.1:8798/local-info >/dev/null && break; sleep 0.5; done
+          curl -fs http://127.0.0.1:8798/local-info
+          cat /tmp/b/spotlight-local-server/VERSION.txt
+          pkill -f "local/server.mjs" || true
       - name: Publish to the local-server release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          notes="Download **spotlight-local-server.zip**, unzip it, and double-click the Start file for your computer. See README.txt inside.
+          notes="Pick the download for the computer that will run the server, unzip it, and double-click the Start file. Nothing else to install. See README.txt inside.
+
+          - **Windows**: spotlight-local-server-windows.zip
+          - **Mac with Apple silicon (M1 or newer)**: spotlight-local-server-mac-arm64.zip
+          - **Mac with Intel**: spotlight-local-server-mac-x64.zip
+          - **Linux PC**: spotlight-local-server-linux-x64.zip
+          - **Raspberry Pi / ARM Linux (64-bit)**: spotlight-local-server-linux-arm64.zip
+          - **Already have Node.js 22.13+, or using Docker**: spotlight-local-server.zip (small)
 
           Built from ${GITHUB_SHA::7} on $(date -u '+%Y-%m-%d %H:%M UTC'). This release is updated automatically."
           if ! gh release view local-server >/dev/null 2>&1; then
@@ -47,4 +66,4 @@ jobs:
           else
             gh release edit local-server --notes "$notes"
           fi
-          gh release upload local-server dist/spotlight-local-server.zip --clobber
+          gh release upload local-server dist/spotlight-local-server*.zip --clobber

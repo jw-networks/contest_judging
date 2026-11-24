@@ -94,10 +94,17 @@ The **confidence monitor** needs no sign-in, so it can run on a screen facing th
 
 Spotlight can also run entirely on a laptop or mini-PC at the venue. Every tablet, phone and laptop on the same Wi-Fi opens it in a browser and syncs through that computer: scores, check-in, photos, and the stage clock on the confidence monitors. No internet is needed. This is optional and separate from the online version.
 
-1. Install [Node.js](https://nodejs.org) (LTS, 22.13 or newer) on the server computer.
-2. Download **[spotlight-local-server.zip](https://github.com/jw-networks/contest_judging/releases/download/local-server/spotlight-local-server.zip)** (also linked from **Admin** in the app), and unzip it.
-3. Double-click **Start Spotlight (Windows).bat** or **Start Spotlight (Mac).command** (Linux: `./start-linux.sh`). Allow network access if asked.
-4. The window shows the address to open on every device (e.g. `http://192.168.1.20:8787`) and, the first time, the admin password.
+1. Download the zip for the computer that will run the server (also linked from **Admin** in the app). Node.js is included, so there's nothing else to install:
+   [Windows](https://github.com/jw-networks/contest_judging/releases/download/local-server/spotlight-local-server-windows.zip) ·
+   [Mac, Apple silicon](https://github.com/jw-networks/contest_judging/releases/download/local-server/spotlight-local-server-mac-arm64.zip) ·
+   [Mac, Intel](https://github.com/jw-networks/contest_judging/releases/download/local-server/spotlight-local-server-mac-x64.zip) ·
+   [Linux](https://github.com/jw-networks/contest_judging/releases/download/local-server/spotlight-local-server-linux-x64.zip) ·
+   [Raspberry Pi / ARM Linux](https://github.com/jw-networks/contest_judging/releases/download/local-server/spotlight-local-server-linux-arm64.zip) ·
+   [without Node.js](https://github.com/jw-networks/contest_judging/releases/download/local-server/spotlight-local-server.zip) (needs Node.js 22.13+ installed, or Docker)
+2. Unzip it and double-click **Start Spotlight (Windows).bat** or **Start Spotlight (Mac).command** (Linux: `./start-linux.sh`). Allow network access if asked.
+3. The window shows the address to open on every device (e.g. `http://192.168.1.20:8787`) and, the first time, the admin password.
+
+The bundled Node.js is the official build from nodejs.org (latest LTS), downloaded and checked against nodejs.org's SHA-256 list by `local/fetch-node.py` during the build.
 
 Data lives in `spotlight-data/` next to the start files: `spotlight.db` (live) and `backups/` (a full copy every 5 minutes and on shutdown, last 48 kept). To move it, stop the server and copy that folder. There's also a Dockerfile in the zip for mini-PCs and NAS boxes. Optional: set `DATA_REPO` and `DATA_REPO_TOKEN` to also copy the data to a private GitHub repo whenever the computer has internet (it uses `local-db.json`, so it never overwrites the cloud copy).
 

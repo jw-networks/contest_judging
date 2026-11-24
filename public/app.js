@@ -1970,7 +1970,22 @@ function accessPanel(cid, online) {
     admins.length ? h('p.small.muted', `Admins always have full access: ${admins.map(u => u.displayName).join(', ')}.`) : null);
 }
 
-const LOCAL_ZIP = 'https://github.com/jw-networks/contest_judging/releases/download/local-server/spotlight-local-server.zip';
+const LOCAL_DL = 'https://github.com/jw-networks/contest_judging/releases/download/local-server/';
+const LOCAL_BUILDS = [
+  ['windows', 'Windows', 'spotlight-local-server-windows.zip'],
+  ['mac-arm64', 'Mac with Apple silicon (M1 or newer)', 'spotlight-local-server-mac-arm64.zip'],
+  ['mac-x64', 'Mac with Intel', 'spotlight-local-server-mac-x64.zip'],
+  ['linux-x64', 'Linux PC', 'spotlight-local-server-linux-x64.zip'],
+  ['linux-arm64', 'Raspberry Pi / ARM Linux (64-bit)', 'spotlight-local-server-linux-arm64.zip'],
+];
+function guessLocalBuild() {
+  const ua = navigator.userAgent, plat = navigator.userAgentData?.platform || navigator.platform || '';
+  if (/Win/i.test(plat) || /Windows/.test(ua)) return 'windows';
+  if (/Mac/i.test(plat) || /Macintosh/.test(ua)) return 'mac-arm64'; // most Macs sold since 2020; Intel is listed too
+  if (/Linux/i.test(plat) && /aarch64|arm/i.test(ua + plat)) return 'linux-arm64';
+  if (/Linux/i.test(plat)) return 'linux-x64';
+  return null;
+}
 
 // Running on the local network server (local/server.mjs): where the data lives and the addresses to use.
 function localServerPanel(st) {
@@ -1989,13 +2004,18 @@ function localServerPanel(st) {
 
 // Shown on the cloud version: how to run the same thing on a private network.
 function localDownloadPanel() {
+  const best = guessLocalBuild();
+  const link = ([key, label, file], primary) => h('a.btn', { class: primary ? 'primary' : '', href: LOCAL_DL + file, rel: 'noopener' }, primary ? `Download for ${label}` : label);
+  const rec = LOCAL_BUILDS.find(b => b[0] === best);
   return h('div.panel.stack', h('h3', 'Run on your own network (optional)'),
-    h('p.small.muted', 'For venues with no reliable internet: run Spotlight on a laptop or mini-PC at the event. Every device on the same Wi-Fi syncs through it, including the stage clock and confidence monitor. It is a separate copy: contests, accounts and scores here are not moved over automatically.'),
+    h('p.small.muted', 'For venues with no reliable internet: run Spotlight on a laptop or mini-PC at the event. Every device on the same Wi-Fi syncs through it, including the stage clock and confidence monitor. Use Transfer contests below to take your setup there and bring the results back.'),
     h('ol.small.muted.steps',
-      h('li', 'Install Node.js (the free LTS version) from nodejs.org on that computer.'),
-      h('li', 'Download the local server, unzip it, and double-click the Start file for your system.'),
-      h('li', 'Open the address it shows on every device, sign in as admin with the password it shows, and set up your contests.')),
-    h('div', h('a.btn.primary', { href: LOCAL_ZIP, rel: 'noopener' }, 'Download local server (.zip)')));
+      h('li', 'Download the version for the computer that will run the server, and unzip it. Nothing else to install.'),
+      h('li', 'Double-click the Start file. Allow network access if asked.'),
+      h('li', 'Open the address it shows on every device, and sign in as admin with the password it shows.')),
+    rec ? h('div', link(rec, true)) : null,
+    h('div.row.wrap.dl-list', LOCAL_BUILDS.filter(b => b !== rec).map(b => link(b, false))),
+    h('p.small.muted', 'Already have Node.js 22.13 or newer, or using Docker? ', h('a', { href: LOCAL_DL + 'spotlight-local-server.zip', rel: 'noopener' }, 'Small download without Node.js'), '.'));
 }
 
 function githubPanel(online) {

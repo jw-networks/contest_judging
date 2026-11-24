@@ -556,3 +556,4 @@ ol.steps { margin: 0; padding-left: 1.3rem; } ol.steps li { margin: .2rem 0; }
 .check-list { display: grid; gap: 4px; }
 .transfer-row { align-items: flex-start; padding: 8px 10px; background: var(--panel-3); }
 .transfer-row input { margin-top: 4px; }
+.dl-list { gap: 6px; } .dl-list .btn { font-size: 12px; }
