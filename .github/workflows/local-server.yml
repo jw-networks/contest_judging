@@ -26,12 +26,13 @@ jobs:
           node-version: 22
       - name: Smoke test (start the server, sign in, stop)
         run: |
-          mkdir -p /tmp/sl && ADMIN_PASSWORD=smoke-test-pw DATA_DIR=/tmp/sl PORT=8799 node local/server.mjs > /tmp/sl/log.txt 2>&1 &
+          mkdir -p /tmp/sl
+          trap 'cat /tmp/sl/log.txt' EXIT
+          ADMIN_PASSWORD=smoke-test-pw DATA_DIR=/tmp/sl PORT=8799 node local/server.mjs > /tmp/sl/log.txt 2>&1 &
           PID=$!
           for i in $(seq 1 20); do curl -fs http://127.0.0.1:8799/local-info >/dev/null && break; sleep 0.5; done
           curl -fs -X POST http://127.0.0.1:8799/api/login -H 'Content-Type: application/json' -d '{"username":"admin","password":"smoke-test-pw"}' | grep -q token
-          kill $PID; sleep 1; ls /tmp/sl/backups | grep -q shutdown
-          cat /tmp/sl/log.txt
+          kill $PID; sleep 2; ls /tmp/sl/backups | grep -q shutdown
       - name: Build zip
         run: python3 local/build-zip.py
       - name: Publish to the local-server release
