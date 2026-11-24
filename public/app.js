@@ -1294,14 +1294,16 @@ const maxTotal = (crits = criteria()) => crits.reduce((a, c) => a + c.max * (c.w
 
 // The signed-in judge's own standings, from their own scores only (drafts included), ranked within each division.
 // Ties share a place (1, 2, 2, 4). Returns Map participantId -> { rank, of, division, total, tied }.
-function myRanking(list, crits = criteria()) {
+// opts.round: which round's score sheets to use (default: the round on screen). opts.group: one label for everyone.
+function myRanking(list, crits = criteria(), opts = {}) {
+  const round = 'round' in opts ? opts.round : scoreRound();
   const groups = new Map();
   for (const p of list) {
-    const sc = S.data.scores[scoreId(p.id)];
+    const sc = S.data.scores[scoreId(p.id, undefined, round)];
     if (!sc || sc.deleted) continue;
     const t = scoreTotal(sc, crits);
     if (!t.filled) continue;
-    const d = heatsOn() ? heatLabel(judgeRound()) : (p.division || '');
+    const d = opts.group ?? (heatsOn() ? heatLabel(judgeRound()) : (p.division || ''));
     if (!groups.has(d)) groups.set(d, []);
     groups.get(d).push({ p, total: t.total });
   }
@@ -1317,12 +1319,16 @@ function myRanking(list, crits = criteria()) {
 }
 const ordinal = n => n + (n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] || 'th');
 
-function judgeItem(p, { crits, stg, offline, rankInfo, inRanking }) {
-  const sc = S.data.scores[scoreId(p.id)];
+// Gold / silver / bronze marker for the judge's current top 3.
+const MEDAL = ['', 'Gold', 'Silver', 'Bronze'];
+const medal = (r, big) => r && r.rank <= 3 ? h('span.medal', { class: 'm' + r.rank + (big ? ' big' : ''), title: `Your current ${ordinal(r.rank)} place${r.tied ? ' (tied)' : ''} — ${MEDAL[r.rank].toLowerCase()}` }, r.rank) : null;
+
+function judgeItem(p, { crits, stg, offline, rankInfo, inRanking, medalInfo, onPick, heatScores }) {
+  const sc = S.data.scores[scoreId(p.id, undefined, heatScores ? null : scoreRound())];
   const live = sc && !sc.deleted;
-  return h('div.item', { class: p.id === ui.judgeSel ? 'sel' : '', onclick: () => goJudge(p.id) },
-    rankInfo ? h('div.num.rank', { title: `Your ${ordinal(rankInfo.rank)} place` }, (rankInfo.tied ? '=' : '') + rankInfo.rank) : h('div.num', { class: inRanking ? 'unranked' : '' }, inRanking ? '–' : (p.number || '–')),
-    h('div.who', h('div.n', (rankInfo || inRanking) && p.number ? h('span.muted', `#${p.number} `) : null, p.title || p.name), h('div.c', partSub(p))),
+  return h('div.item', { class: p.id === ui.judgeSel ? 'sel' : '', onclick: () => (onPick || goJudge)(p.id) },
+    rankInfo ? h('div.num.rank', { class: rankInfo.rank <= 3 ? 'm' + rankInfo.rank : '', title: `Your ${ordinal(rankInfo.rank)} place` }, (rankInfo.tied ? '=' : '') + rankInfo.rank) : h('div.num', { class: inRanking ? 'unranked' : '' }, inRanking ? '–' : (p.number || '–')),
+    h('div.who', h('div.n', medal(medalInfo), (rankInfo || inRanking) && p.number ? h('span.muted', `#${p.number} `) : null, p.title || p.name), h('div.c', partSub(p))),
     !isMakers() && p.id === stg.participantId ? h('span.badge.on_stage', offline ? 'last on stage' : 'on stage') : null,
     live && sc.submitted ? h('span.badge.submitted', (rankInfo ? '' : 'Done ') + fmt1(scoreTotal(sc, crits).total))
       : live && scoreTotal(sc, crits).filled ? h('span.badge.draft', rankInfo ? 'draft ' + fmt1(scoreTotal(sc, crits).total) : 'draft') : null);
@@ -1342,6 +1348,25 @@ function judgeRankingList(list, ctx) {
     }),
     unscored.length ? h('div', h('div.rank-div', 'Not scored yet'), h('div.list', unscored.map(p => judgeItem(p, { ...ctx, inRanking: true })))) : null,
     h('p.small.muted', { style: { marginTop: '.6rem' } }, 'Only your own scores, including drafts. Final results average all judges, so they can differ.'));
+}
+
+// The judge's own standings across every heat so far (heat score sheets only, drafts included).
+function judgeAllHeats(ctx) {
+  const pool = runOrder().filter(p => p.status !== 'no_show' && p.heat >= 1 && p.heat <= (settings().heats || 0));
+  const ranks = myRanking(pool, ctx.crits, { round: null, group: 'All heats' });
+  const open = p => { ui.judgeRound = p.heat; ui.judgeSel = p.id; ui.judgeTab = 'order'; render(); goJudge(p.id); };
+  if (!ranks.size) return h('p.muted', 'Your top 3 across all heats shows here once you have scored some heat entries.');
+  const ranked = pool.filter(p => ranks.has(p.id)).sort((a, b) => ranks.get(a.id).rank - ranks.get(b.id).rank || byNum(a, b));
+  const top = ranked.filter(p => ranks.get(p.id).rank <= 3), rest = ranked.filter(p => ranks.get(p.id).rank > 3);
+  const totalOf = p => fmt1(ranks.get(p.id).total);
+  return h('div',
+    h('div.rank-div', 'Your top 3 across all heats'),
+    h('div.top3', top.map(p => { const r = ranks.get(p.id); return h('button.top3-card', { type: 'button', class: 'm' + r.rank, onclick: () => open(p), title: 'Open their heat score sheet' },
+      medal(r, true), h('div.who', h('div.n', partLabel(p)), h('div.c', [p.character || p.materials, heatLabel(p.heat)].filter(Boolean).join(' · '))),
+      h('div.t', totalOf(p), r.tied ? h('span.small.muted', ' tie') : null)); })),
+    rest.length ? h('div', h('div.rank-div', 'Everyone else you have scored'),
+      h('div.list', rest.map(p => judgeItem(p, { ...ctx, rankInfo: ranks.get(p.id), onPick: () => open(p), heatScores: true })))) : null,
+    h('p.small.muted', { style: { marginTop: '.6rem' } }, `${ranks.size} of ${pool.length} heat entries scored so far. Only your own heat scores, including drafts. Finalists are picked from all judges' averages, so they can differ.`));
 }
 
 function viewJudge() {
@@ -1371,12 +1396,13 @@ function viewJudge() {
     h('div.grid.cols-2',
       h('div.panel', h('div.row.between', h('h3', heatsOn() ? heatLabel(round) : WORDS().Many), h('span.muted.small', `${scored}/${list.length} submitted`)),
         heatsOn() ? roundPicker(round, r => { ui.judgeRound = r; ui.judgeSel = null; render(); }, { counts: r => roundList(r, runOrder().filter(p => p.status !== 'no_show')).length }) : null,
-        list.length ? h('div.seg.judge-tabs', { role: 'tablist' },
-          [['order', isMakers() ? 'Entry order' : 'Running order'], ['rank', 'My ranking']].map(([k, label]) =>
+        list.length || heatsOn() ? h('div.seg.judge-tabs', { role: 'tablist' },
+          [['order', heatsOn() ? 'Order' : isMakers() ? 'Entry order' : 'Running order'], ['rank', 'My ranking'], ...(heatsOn() ? [['all', 'All heats']] : [])].map(([k, label]) =>
             h('button', { type: 'button', role: 'tab', class: (ui.judgeTab || 'order') === k ? 'on' : '', 'aria-selected': (ui.judgeTab || 'order') === k ? 'true' : 'false', onclick: () => { ui.judgeTab = k; render(); } }, label))) : null,
-        !list.length ? h('p.muted', heatsOn() ? (round === 'final' ? 'Finalists appear here once the contest lead confirms them.' : `Nobody checked in for ${heatLabel(round)} yet.`) : `${WORDS().Many} appear here once they are checked in.`)
+        ui.judgeTab === 'all' && heatsOn() ? judgeAllHeats({ crits, stg, offline })
+          : !list.length ? h('p.muted', heatsOn() ? (round === 'final' ? 'Finalists appear here once the contest lead confirms them.' : `Nobody checked in for ${heatLabel(round)} yet.`) : `${WORDS().Many} appear here once they are checked in.`)
           : ui.judgeTab === 'rank' ? judgeRankingList(list, { crits, stg, offline })
-          : h('div.list', list.map(p => judgeItem(p, { crits, stg, offline })))),
+          : (rk => h('div.list', list.map(p => judgeItem(p, { crits, stg, offline, medalInfo: rk.get(p.id) }))))(myRanking(list, crits))),
       sel ? scoreForm(sel, crits, locked, list) : h('div.panel.muted', `Pick ${isMakers() ? 'an entry' : 'a contestant'} to score.`)));
 }
 
