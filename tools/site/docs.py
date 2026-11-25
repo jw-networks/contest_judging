@@ -6,6 +6,7 @@ toc = [
   ('Before the show', [('setup', 'Setting up a contest'), ('signups', 'Sign-up links'), ('heats', 'Heats and finals')]),
   ('On the day', [('checkin', 'Check-in'), ('stage', 'Running the stage'), ('judging', 'Judging'), ('paper', 'Paper score cards'), ('offline', 'Offline and local mode')]),
   ('After the show', [('results', 'Results'), ('feedback', 'Contestant feedback')]),
+  ('Contestants', [('contestants', 'Contestant sign-in')]),
   ('Your organization', [('accounts', 'Accounts and passwords'), ('data', 'Backups and your data')]),
 ]
 nav = ''.join(f'<div class="group">{g}</div>' + ''.join(f'<a href="#{i}">{t}</a>' for i, t in items) for g, items in toc)
@@ -155,7 +156,25 @@ body = '''
     <li>the quick notes the judges ticked, most-ticked first</li>
     <li>the judges' written comments, if you allow them</li>
   </ul>
-  <p>It never says which judge gave what. Print a sheet for everyone (or one from an entry's Review page), email each contestant their own, or show it on their private sign-up page.</p>
+  <p>It never says which judge gave what. Print a sheet for everyone (or one from an entry's Review page), email each contestant their own, or turn on <b>Show feedback to contestants</b> so they see it when they <a href="#contestants">sign in</a>.</p>
+</section>
+
+<section id="contestants">
+  <h2>Contestant sign-in</h2>
+  <p>Contestants can sign in with their own contestant ID and password to:</p>
+  <ul>
+    <li>tell the emcee how to say their name</li>
+    <li>write a short intro for the emcee to read as they walk on</li>
+    <li>see their own feedback after the show, once you share it</li>
+  </ul>
+  <p>They can change their name pronunciation and intro until they've been on stage. They never see anything about the judges or other contestants.</p>
+  <h3>Giving contestants their logins</h3>
+  <ul>
+    <li>People who sign up online get their login straight away, on screen and in their confirmation email.</li>
+    <li>For everyone else, use <b>Setup → Contestant logins</b>: email the logins to everyone with an email address, then make logins for the rest and <b>print slips</b> (eight to a page, each with a QR code to the sign-in page) or <b>download a CSV</b>.</li>
+    <li>Passwords are only shown when they're made. If someone loses theirs, open their entry and tap <b>New password</b>. That also signs them out of their other devices.</li>
+  </ul>
+  <p>Contestants sign in from the “Contestant? Sign in here” link on the sign-in screen.</p>
 </section>
 
 <section id="accounts">

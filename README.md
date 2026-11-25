@@ -180,6 +180,15 @@ Each contest can have its own sign-up form. Contest leads and admins turn it on 
 - **Organizations:** links for other organizations include the org code (`#/o/<code>/signup/…`), so entries always land in the right organization. Sign-ups also work on the local network server.
 - **Export:** "Download sign-ups (CSV)" lists everyone who signed up online, with their answers.
 
+## Contestant sign-in
+
+Contestants can sign in with a contestant ID (6 characters, unique in the organization) and a random password to set how to say their name and their emcee intro (until they've been on stage), and to see their own feedback once it's released (Results → Contestant feedback → Show feedback to contestants). They never see judges or other entries.
+
+- Online sign-ups get a login straight away (on screen and in the confirmation email).
+- **Setup → Contestant logins:** email logins to everyone with an email address, then make logins for the rest and print slips (8 per page, QR code to the sign-in page) or download a CSV. Passwords are shown only when made; the server keeps a hash.
+- **New password** on an entry resets it and signs that contestant out everywhere.
+- Contestants sign in at `/app/#/me` (or `/app/#/o/<code>/me`), linked from the sign-in screen. Their sign-in is separate from staff accounts and can't reach staff data; wrong passwords slow down that contestant ID (and, much more loosely, that network address) without ever affecting staff sign-ins.
+
 ## Contestant feedback
 
 **Results → Contestant feedback** (contest leads and admins). For each contestant: their average score, their average for each category, the quick notes the judges ticked (most-ticked first) and, if you allow it, the judges' written comments. It never says which judge gave what: no names, and comments are listed alphabetically, not in judge order. Only submitted score sheets count. With heats, heats and finals are shown separately.

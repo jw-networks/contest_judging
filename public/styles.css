@@ -704,3 +704,26 @@ pre.handover { margin: 0; padding: 12px; white-space: pre-wrap; font: 600 14px/1
 
 .show-step { margin-top: 14px; flex-wrap: wrap; }
 .show-step .btn.primary { min-height: 54px; font-size: 18px; }
+
+/* contestant sign-in */
+.ct-creds { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 12px; background: var(--panel-3); border-left: 3px solid var(--cyan); }
+.ct-creds b { display: block; font-size: 22px; letter-spacing: .06em; font-family: ui-monospace, Menlo, Consolas, monospace; }
+.ct-creds p { grid-column: 1 / -1; margin: 0; }
+.ct-stage { border-top: 1px solid var(--line-2); padding-top: 12px; }
+.ct-later { border-top: 1px solid var(--line-2); padding-top: 12px; }
+.ct-table { max-height: 50vh; overflow: auto; }
+.ct-login-row { align-items: center; gap: 12px; padding: 8px 10px; background: var(--panel-3); }
+.mono { font-family: ui-monospace, Menlo, Consolas, monospace; letter-spacing: .04em; }
+/* printed login slips: 8 per page */
+.slip-page { display: grid; grid-template-columns: 1fr 1fr; gap: 0; }
+.slip { display: flex; gap: 4mm; align-items: center; border: 1px dashed #999; padding: 5mm; height: 62mm; box-sizing: border-box; color: #111; break-inside: avoid; }
+.slip-main { flex: 1; min-width: 0; }
+.slip-kicker { font-size: 8.5pt; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: #0f8a9b; }
+.slip-who { font-size: 12pt; margin: 1.5mm 0 3mm; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.slip-who span { color: #555; }
+.slip-creds { display: grid; grid-template-columns: auto auto; justify-content: start; gap: 2mm 6mm; margin-bottom: 3mm; }
+.slip-creds span { display: block; font-size: 8pt; color: #555; }
+.slip-creds b { font: 700 13pt ui-monospace, Menlo, Consolas, monospace; letter-spacing: .02em; white-space: nowrap; }
+.slip-how { font-size: 8.5pt; color: #333; line-height: 1.35; }
+.slip-qr { flex: none; line-height: 0; }
+.slip-qr svg { width: 24mm; height: 24mm; }

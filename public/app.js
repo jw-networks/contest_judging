@@ -559,7 +559,7 @@ function home() {
   return { admin: 'results', lead: 'results', viewer: 'results', coordinator: 'checkin', judge: 'judge', tech: 'tech', emcee: 'emcee' }[r] || 'none';
 }
 // Sign-up links keep their organization in the address (#/o/<code>/signup/…), so a refresh or bookmark stays on the right form.
-const route = () => { const [name, ...args] = location.hash.replace(/^#\/?/, '').replace(/^o\/[a-z0-9-]{1,30}\/(?=(signup|reset)(\/|$))/i, '').split('/'); return { name: name || '', args }; };
+const route = () => { const [name, ...args] = location.hash.replace(/^#\/?/, '').replace(/^o\/[a-z0-9-]{1,30}\/(?=(signup|reset|me)(\/|$))/i, '').split('/'); return { name: name || '', args }; };
 
 window.addEventListener('hashchange', () => render());
 
@@ -587,11 +587,11 @@ let monitorActive = false;
 // #/o/<code>/<rest>: an organization's link. Remembers the code on this device (or, for a monitor, shows that
 // org's monitor without signing in), then continues to <rest>.
 function takeOrgLink() {
-  if (/^#\/(signup|reset)(\/|$)/.test(location.hash) && !CFG.local) { ui.orgOverride = ''; return false; } // the main organization's form / reset page
+  if (/^#\/(signup|reset|me)(\/|$)/.test(location.hash) && !CFG.local) { ui.orgOverride = ''; return false; } // the main organization's form / reset page
   const m = location.hash.match(/^#\/o\/([a-z0-9-]{1,30})(?:\/(.*))?$/i);
   if (!m || CFG.local) return false;
   const code = m[1].toLowerCase(), rest = m[2] || '';
-  if (rest.startsWith('signup') || rest.startsWith('reset')) { ui.orgOverride = code; return false; }
+  if (rest.startsWith('signup') || rest.startsWith('reset') || /^me(\/|$)/.test(rest)) { ui.orgOverride = code; return false; }
   if (rest.startsWith('monitor')) { ui.orgOverride = code; location.replace('#/' + rest); return true; }
   localStorage.setItem('cj-org', code);
   if (S.account && (S.account.org || '') !== code) { switchPerson(); return true; }
@@ -602,7 +602,7 @@ function takeOrgLink() {
 
 function render() {
   if (takeOrgLink()) return;
-  if (ui.orgOverride != null && !['monitor', 'signup', 'reset'].includes(route().name)) { ui.orgOverride = null; connectEvents(); }
+  if (ui.orgOverride != null && !['monitor', 'signup', 'reset', 'me'].includes(route().name)) { ui.orgOverride = null; connectEvents(); }
   const app = $('#app');
   const r = route();
   if (r.name === 'monitor') { if (!monitorActive || (r.args[0] || null) !== mon.cid) renderMonitor(app); return; }
@@ -610,6 +610,7 @@ function render() {
   // Public sign-up pages: no account needed. Drawn once per address so a background sync never wipes the form.
   if (r.name === 'signup') { if (signupShown !== location.hash) renderSignup(app, r.args); return; }
   if (r.name === 'reset') { if (signupShown !== location.hash) renderReset(app, r.args[0]); return; }
+  if (r.name === 'me') { if (signupShown !== location.hash) renderContestant(app, r.args[0]); return; }
   signupShown = null;
   if (!S.account) { renderLogin(app); return; }
   if (!r.name && !curId() && S.rev === 0) {
@@ -825,6 +826,7 @@ async function renderLogin(app) {
         onclick: () => { user.value = a.username; org.value = a.org || ''; pw.focus(); } }, a.user?.displayName || a.username, a.org && !CFG.local ? h('span.org-tag', a.org) : null)))) : null,
     orgField, user, pw, err, btn,
     CFG.local ? null : h('div.small', { style: { textAlign: 'center' } }, h('a', { href: '#', onclick: e => { e.preventDefault(); forgotPassword(org, user); } }, 'Forgot your password?')),
+    h('div.small', { style: { textAlign: 'center' } }, 'Contestant? ', h('a', { href: '#', onclick: e => { e.preventDefault(); const code = CFG.local ? '' : String(org?.value || '').trim().toLowerCase(); location.hash = `#/${code ? 'o/' + code + '/' : ''}me`; } }, 'Sign in here')),
     serverInfo),
     h('p.small.muted', { style: { textAlign: 'center', marginTop: '1.5rem' } }, h('a', { href: monitorHref('') }, 'Open a confidence monitor (no sign-in needed)'))));
   setTimeout(() => { const a = document.activeElement; if (!a || a === document.body) user.focus(); }, 50); // never steal focus from a field already in use
@@ -991,6 +993,12 @@ function editParticipant(p, defaults = {}) {
     answerInputs.length ? h('div.stack', h('h3', 'Sign-up answers'),
       h('div.form-grid', answerInputs.map(({ q, el }) => q.type === 'check' ? h('label.check', el, q.label) : h('label.field', h('span', q.label), el)))) : null,
     p.source === 'signup' && !isNew ? h('p.small.muted', `Signed up online${p.signupAt ? ' on ' + new Date(p.signupAt).toLocaleString() : ''}.`) : null,
+    !isNew && manages() ? h('div.row.ct-login-row',
+      h('span.small', p.loginId ? ['Contestant ID ', h('b.mono', p.loginId)] : 'No contestant login yet.'),
+      h('button.btn.sm', { onclick: async () => {
+        if (p.loginId && !confirm(`Make a new password for ${partLabel(p)}? Their old password stops working.`)) return;
+        await makeLogins({ ids: [p.id] }, p.loginId ? 'New password' : 'New contestant login');
+      } }, p.loginId ? 'New password' : 'Make a login')) : null,
     isMakers() ? null : h('div.stack', h('h3', 'For tech & emcee'),
       h('div.form-grid', PART_FIELDS.show.map(([k, label, ph]) => field(k, label, inp(k, ph)))),
       field('intro', 'Emcee intro (read on stage)', ta('intro'))),
@@ -1920,7 +1928,7 @@ function feedbackPanel() {
     h('h3', 'Contestant feedback'),
     h('p.small.muted', 'Each contestant gets their average score, their average for each category and the quick notes the judges ticked. It never says which judge gave what. Only submitted score sheets count.'),
     h('div', h('label.check', h('input', { type: 'checkbox', checked: fb.comments !== false, onchange: e => set({ comments: e.target.checked }) }), 'Include the judges\' written comments (without names)')),
-    h('div', h('label.check', h('input', { type: 'checkbox', checked: !!fb.released, onchange: e => set({ released: e.target.checked }) }), 'Show feedback on contestants\' private sign-up pages')),
+    h('div', h('label.check', h('input', { type: 'checkbox', checked: !!fb.released, onchange: e => set({ released: e.target.checked }) }), 'Show feedback to contestants (when they sign in, and on their private sign-up page)')),
     h('div.row',
       h('button.btn', { disabled: !scored.length, onclick: () => printPages(scored.map(feedbackSheet)) }, `Print feedback sheets (${scored.length})`),
       S.emailOn ? h('button.btn', { disabled: !unsent.length || S.net !== 'online', onclick: () => sendAll(false) }, unsent.length ? `Email feedback (${unsent.length} not sent yet)` : 'Feedback emailed to everyone') : null,
@@ -2225,6 +2233,7 @@ function viewSetup() {
     accessPanel(cid, online),
 
     manages() ? signupPanel(cid, online) : null,
+    manages() ? contestantLoginsPanel(online) : null,
 
     h('div.panel.stack', h('h3', `Import ${W.many}`),
       h('p.small.muted', 'Paste rows from a spreadsheet or choose a CSV file. First row must be headers. Recognised columns: ' + (isMakers()
@@ -2239,6 +2248,63 @@ function viewSetup() {
 }
 
 /** Clear personal data (admins, leads) and delete the contest (admins). */
+// ---------- Setup → Contestant logins (contest leads and admins)
+const contestantSignInUrl = id => `${appBaseUrl()}me${id ? '/' + id : ''}`;
+function loginSlips(list) {
+  const st = settings(), ev = eventName();
+  const slips = list.map(l => {
+    const qr = h('div.slip-qr'); qr.innerHTML = qrSvg(contestantSignInUrl(l.loginId), { size: 96, margin: 1 });
+    return h('div.slip',
+      h('div.slip-main',
+        h('div.slip-kicker', [ev, st.name].filter(Boolean).join(' · ')),
+        h('div.slip-who', h('b', '#' + (l.number || '?') + ' '), l.title || l.name, l.character ? h('span', ' as ' + l.character) : null),
+        h('div.slip-creds', h('div', h('span', 'Contestant ID'), h('b', l.loginId)), h('div', h('span', 'Password'), h('b', l.password))),
+        h('div.slip-how', 'Scan the code or go to ', h('b', contestantSignInUrl().replace(/^https?:\/\//, '')), ' to tell the emcee how to say your name, write your intro, and see your feedback after the show.')),
+      qr);
+  });
+  const pages = [];
+  for (let i = 0; i < slips.length; i += 8) pages.push(h('section.sheet.slip-page', slips.slice(i, i + 8)));
+  printPages(pages);
+}
+function loginsCsv(list) {
+  const head = ['Number', isMakers() ? 'Entry' : 'Name', isMakers() ? 'Maker' : 'Character', 'Email', 'Contestant ID', 'Password', 'Sign-in link'];
+  const rows = list.map(l => [l.number, l.title || l.name, l.title ? l.name : l.character, l.email, l.loginId, l.password, contestantSignInUrl(l.loginId)]);
+  download(`contestant-logins-${slug(settings().name)}.csv`, [head, ...rows].map(r => r.map(csvCell).join(',')).join('\n') + '\n', 'text/csv');
+}
+function showNewLogins(list, title) {
+  openModal(title, h('div.stack',
+    h('p.small.muted', 'These passwords are shown only now. Print the slips or download the list before you close this. (You can always make a new password for someone from their entry.)'),
+    h('div.row', h('button.btn.primary', { onclick: () => loginSlips(list) }, `Print slips (${list.length})`), h('button.btn', { onclick: () => loginsCsv(list) }, 'Download CSV')),
+    h('div.ct-table', h('table.data', h('thead', h('tr', h('th', '#'), h('th', 'Name'), h('th', 'Contestant ID'), h('th', 'Password'), h('th', ''))),
+      h('tbody', list.map(l => h('tr', h('td', l.number), h('td', l.title || l.name), h('td.mono', l.loginId), h('td.mono', l.password), h('td.small.muted', l.emailed ? 'emailed' : ''))))))));
+}
+async function makeLogins(opts, title) {
+  const all = [];
+  try {
+    for (let guard = 0; guard < 50; guard++) {
+      const r = await api('/api/contestants/logins', { contestId: curId(), appBase: appBaseUrl(), ...opts }, { token: S.account.token, timeout: 60000 });
+      all.push(...r.logins);
+      if (!opts.email || !r.remaining || !r.logins.length) break;
+    }
+  } catch (e) { toast(e.status ? e.message : 'You need to be online to make logins', 'bad'); }
+  sync();
+  if (all.length) showNewLogins(all, title);
+  else if (!opts.email) toast('Everyone already has a login. Use New password on someone\'s entry to reset theirs.', 'ok');
+  return all;
+}
+function contestantLoginsPanel(online) {
+  const ps = participants().filter(p => !['withdrawn', 'declined'].includes(p.status));
+  const have = ps.filter(p => p.loginId).length, missing = ps.filter(p => !p.loginId), missingEmail = missing.filter(p => p.email);
+  return h('div.panel.stack',
+    h('h3', 'Contestant logins'),
+    h('p.small.muted', `Contestants sign in at ${contestantSignInUrl().replace(/^https?:\/\//, '')} with an ID and password${isMakers() ? ' to see their feedback after the show.' : ' to tell the emcee how to say their name, write their intro, and see their feedback after the show.'} People who sign up online get theirs straight away. Feedback is shown once you turn it on in Results.`),
+    h('p.small', `${have} of ${ps.length} ${ps.length === 1 ? 'entry has' : 'entries have'} a login.`),
+    h('div.row',
+      S.emailOn && missingEmail.length ? h('button.btn', { disabled: !online, onclick: () => { if (confirm(`Email logins to ${missingEmail.length} ${missingEmail.length === 1 ? 'contestant' : 'contestants'} who have an email address?`)) makeLogins({ email: true }, 'Logins emailed'); } }, `Email logins (${missingEmail.length} with an email)`) : null,
+      h('button.btn', { disabled: !online || !missing.length, onclick: () => makeLogins({}, 'New contestant logins') }, missing.length ? `Make logins for the rest (${missing.length})` : 'Everyone has a login')),
+    !online ? h('p.small.muted', 'You need to be online to make logins.') : null);
+}
+
 // ---------- Setup → Sign-ups (contest leads and admins)
 const randKey = () => Array.from(crypto.getRandomValues(new Uint8Array(18)), b => 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789'[b % 56]).join('');
 const toLocalInput = t => { if (!t) return ''; const d = new Date(t); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); };
@@ -2602,23 +2668,57 @@ function signupDone(body, head, key, r, photoFails) {
     r.number ? h('div.big-num', '#' + r.number) : null,
     h('p', r.status === 'pending' ? 'Thanks! The organizers will review your sign-up. Your entry number is above.' : 'Thanks! Your entry number is above. Please check in when you arrive.'),
     r.heat ? h('p', `You're in heat ${r.heat}.`) : null,
+    r.loginId ? h('div.ct-creds', h('div', h('span.kicker', 'Contestant ID'), h('b', r.loginId)), h('div', h('span.kicker', 'Password'), h('b', r.password)),
+      h('p.small.muted', r.emailed ? 'Also in your email. ' : 'Write these down or take a screenshot. ', 'Sign in with them to tell the emcee how to say your name, write your intro, and see your feedback after the show.')) : null,
     photoFails ? h('p.err', `${photoFails} photo${photoFails === 1 ? '' : 's'} didn't upload. You can bring them on the day.`) : null,
     r.emailed ? h('div.banner', h('span.tag', 'Emailed'), h('span.grow', 'We\'ve emailed you this private link. It shows your entry and lets you withdraw. Keep the email.'))
       : h('div.banner.warn', h('span.tag', 'Save this'), h('span.grow', 'This private link shows your entry and lets you withdraw. Bookmark it or copy it somewhere safe: it\'s the only copy.')),
     h('div.local-addr', h('code', link), h('button.btn.sm.ghost', { onclick: () => navigator.clipboard?.writeText(link).then(() => toast('Copied', 'ok'), () => {}) }, 'Copy')),
     h('div.row', h('a.btn', { href: link }, 'Open my entry'), h('button.btn.ghost', { onclick: () => { signupShown = null; render(); } }, 'Sign up another entry'))));
 }
+// What a contestant sees about their own entry: status, their stage details for the emcee, and (once released)
+// their own feedback. e: the server's entry view. save(patch) → updated view (null = can't edit here).
+function contestantEntry(e, save) {
+  const word = { pending: 'Waiting for review', waitlisted: e.waitlistPos ? `On the waitlist (number ${e.waitlistPos} in line)` : 'On the waitlist', registered: 'Signed up', checked_in: 'Checked in', on_stage: 'On stage', done: 'Competed', withdrawn: 'Withdrawn', declined: 'Not accepted', no_show: 'Marked as not attending' }[e.status] || e.status;
+  const out = ['withdrawn', 'declined', 'no_show'].includes(e.status);
+  const showFields = e.contestType !== 'makers' && save && !out;
+  let stageBox = null;
+  if (showFields) {
+    const say = h('input', { type: 'text', maxlength: 120, value: e.pronunciation || '', placeholder: 'e.g. AL-iss mo-ROH', disabled: !e.editable });
+    const intro = h('textarea', { rows: 4, maxlength: 600, placeholder: 'A sentence or two the emcee can read as you walk on: who you are, what you made, how long it took…', disabled: !e.editable }, e.intro || '');
+    const left = h('span.small.muted');
+    const count = () => { left.textContent = `${600 - intro.value.length} characters left`; };
+    intro.addEventListener('input', count); count();
+    const btn = h('button.btn.primary', { type: 'submit', disabled: !e.editable }, 'Save');
+    stageBox = h('form.stack.ct-stage', { onsubmit: async ev => {
+      ev.preventDefault(); btn.disabled = true;
+      try { await save({ pronunciation: say.value.trim(), intro: intro.value.trim() }); toast('Saved. The emcee will see it.', 'ok'); }
+      catch (x) { toast(x.message, 'bad'); }
+      btn.disabled = false;
+    } },
+      h('h3', 'For the emcee'),
+      h('p.small.muted', e.editable ? 'The emcee reads these as you take the stage. You can change them until you go on stage.' : 'Your entry has been on stage, so these can\'t be changed now.'),
+      h('label.field', h('span', 'How to say your name'), say),
+      h('label.field', h('span', 'Your intro'), intro, left),
+      e.editable ? h('div', btn) : null);
+  }
+  return [
+    h('span.kicker', 'Your entry'), h('div.big-num', '#' + e.number),
+    h('h2', e.title || e.name), h('p.muted', [e.character, e.title ? e.name : ''].filter(Boolean).join(' · ')),
+    h('p', h('b', 'Status: '), word, e.heat ? ` · heat ${e.heat}` : ''),
+    e.photos ? h('p.small.muted', `${e.photos} photo${e.photos === 1 ? '' : 's'} sent.`) : null,
+    stageBox,
+    e.feedback?.length ? h('div.fb-public', h('h2', 'Judges\' feedback'), feedbackBody(e.feedback, e.heats), h('p.small.muted', 'Scores are averaged across all judges.'))
+      : out ? null : h('p.small.muted.ct-later', 'Your judges\' feedback will appear here after the show, once the organizers share it.'),
+  ];
+}
 async function signupEntryPage(body, head, key, entryId, token) {
   const q = `?entry=${encodeURIComponent(entryId || '')}&token=${encodeURIComponent(token || '')}`;
   const draw = e => {
     const out = ['withdrawn', 'declined', 'no_show'].includes(e.status);
-    const word = { pending: 'Waiting for review', waitlisted: e.waitlistPos ? `On the waitlist (number ${e.waitlistPos} in line)` : 'On the waitlist', registered: 'Signed up', checked_in: 'Checked in', on_stage: 'On stage', done: 'Competed', withdrawn: 'Withdrawn', declined: 'Not accepted', no_show: 'Marked as not attending' }[e.status] || e.status;
     body.replaceChildren(head, h('div.panel.stack',
-      h('span.kicker', 'Your entry'), h('div.big-num', '#' + e.number),
-      h('h2', e.title || e.name), h('p.muted', [e.character, e.title ? e.name : ''].filter(Boolean).join(' · ')),
-      h('p', h('b', 'Status: '), word, e.heat ? ` · heat ${e.heat}` : ''),
-      e.photos ? h('p.small.muted', `${e.photos} photo${e.photos === 1 ? '' : 's'} sent.`) : null,
-      e.feedback?.length ? h('div.fb-public', h('h2', 'Judges\' feedback'), feedbackBody(e.feedback, e.heats), h('p.small.muted', 'Scores are averaged across all judges.')) : null,
+      ...contestantEntry(e, async patch => draw(await api(`/api/signup/${key}/update`, { entry: entryId, token, ...patch }))),
+      e.loginId ? h('p.small.muted', `Your contestant ID is ${e.loginId}. Use it with the password you were given to `, h('a', { href: `#/${orgCode() ? 'o/' + orgCode() + '/' : ''}me/${e.loginId}` }, 'sign in as a contestant'), '.') : null,
       out ? h('p.muted', e.status === 'withdrawn' ? 'You\'ve withdrawn from this contest. To sign up again, use the contest\'s sign-up link.' : 'Questions? Contact the organizers.')
         : ['on_stage', 'done'].includes(e.status) ? null
         : h('button.btn.danger', { onclick: async ev => {
@@ -2629,6 +2729,58 @@ async function signupEntryPage(body, head, key, entryId, token) {
   };
   const load = () => api(`/api/signup/${key}/entry${q}`).then(draw).catch(e => body.replaceChildren(head, h('div.panel.stack', h('p', e.message))));
   load();
+}
+
+// #/me[/<contestant ID>]: contestants sign in with the ID and password from their slip or email.
+const ctKey = () => 'cj-ct:' + (orgCode() || '');
+function renderContestant(app, presetId) {
+  signupShown = location.hash;
+  app.dataset.shell = '';
+  const body = h('div.stack');
+  app.replaceChildren(h('div.signup-page', h('div.logo', h('img', { src: 'icons/icon.svg', alt: '' }), h('span.kicker', APP_NAME)), body));
+  let token = null; try { token = localStorage.getItem(ctKey()); } catch { /* private mode */ }
+  const signOut = async () => {
+    if (token) api('/api/contestant/logout', {}, { token }).catch(() => {});
+    try { localStorage.removeItem(ctKey()); } catch { /* ignore */ }
+    token = null; showLogin();
+  };
+  const showMine = e => {
+    body.replaceChildren(
+      h('div.signup-head', e.eventName ? h('span.kicker', e.eventName) : null, h('h1', e.contest)),
+      h('div.panel.stack', ...contestantEntry(e, async patch => showMine(await api('/api/contestant/me', patch, { token })))),
+      h('p.small', { style: { textAlign: 'center' } }, h('a', { href: '#', onclick: ev => { ev.preventDefault(); signOut(); } }, 'Sign out')));
+  };
+  const showLogin = (msg = '') => {
+    const id = h('input', { type: 'text', autocapitalize: 'characters', autocomplete: 'username', spellcheck: false, value: (presetId || '').toUpperCase(), placeholder: 'e.g. K7P3QX' });
+    const pw = h('input', { type: 'password', autocomplete: 'current-password', autocapitalize: 'none', spellcheck: false, placeholder: 'e.g. abcd-2345' });
+    const org = CFG.local ? null : h('input', { type: 'text', autocapitalize: 'none', autocomplete: 'organization', value: orgCode(), placeholder: 'Leave empty if you weren\'t given one' });
+    const err = h('p.err', msg), btn = h('button.btn.primary.big', { type: 'submit' }, 'Sign in');
+    body.replaceChildren(h('form.panel.stack', { onsubmit: async ev => {
+      ev.preventDefault(); err.textContent = ''; btn.disabled = true;
+      try {
+        if (org) { const code = org.value.trim().toLowerCase(); ui.orgOverride = code; }
+        const r = await api('/api/contestant/login', { loginId: id.value, password: pw.value });
+        token = r.token;
+        try { localStorage.setItem(ctKey(), token); } catch { /* private mode: signed in for this visit */ }
+        // Keep the organization in the address, so a refresh or bookmark stays signed in.
+        history.replaceState(null, '', `#/${orgCode() ? 'o/' + orgCode() + '/' : ''}me`); signupShown = location.hash;
+        showMine(r.entry);
+      } catch (x) { err.textContent = x.message; btn.disabled = false; }
+    } },
+      h('h2', 'Contestant sign-in'),
+      h('p.small.muted', 'Use the contestant ID and password from your slip or email. Then you can tell the emcee how to say your name, write your intro, and see your judges\' feedback after the show.'),
+      org && !orgCode() ? h('label.field', h('span', 'Organization code'), org) : null,
+      h('label.field', h('span', 'Contestant ID'), id), h('label.field', h('span', 'Password'), pw), err, btn,
+      h('p.small.muted', 'Lost your password? Ask the organizers for a new one.'),
+      h('p.small', h('a', { href: '#/' }, 'Staff sign-in'))));
+    setTimeout(() => (id.value ? pw : id).focus(), 30);
+  };
+  if (!token) return showLogin();
+  body.replaceChildren(h('p.muted', 'Loading…'));
+  api('/api/contestant/me', null, { token }).then(showMine).catch(x => {
+    if (x.status === 401) { try { localStorage.removeItem(ctKey()); } catch { /* ignore */ } token = null; showLogin(x.message); }
+    else body.replaceChildren(h('div.panel.stack', h('p', x.message || 'Couldn\'t load your entry. Check your connection.'), h('button.btn', { onclick: () => renderContestant(app, presetId) }, 'Try again')));
+  });
 }
 
 // #/reset/<token>  (from a password-reset email)

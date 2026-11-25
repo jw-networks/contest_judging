@@ -427,6 +427,62 @@ export class Contest {
     }
     return best;
   }
+  // ---------- contestant logins
+  // Each entry can have a contestant ID (6 characters, unique in the organization) and a random password.
+  // The password is only ever shown when it's made; the server keeps a hash. Contestants sign in to set how to
+  // say their name and their emcee intro, and (once released) to see their own feedback.
+  newLoginId() {
+    const A = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    const taken = new Set(Object.values(this.db.data.participants).map(p => p.loginId).filter(Boolean));
+    for (;;) { const id = Array.from(crypto.getRandomValues(new Uint8Array(6)), b => A[b % 32]).join(''); if (!taken.has(id)) return id; }
+  }
+  async issueLogin(p) {
+    const A = 'abcdefghjkmnpqrstuvwxyz23456789';
+    const raw = Array.from(crypto.getRandomValues(new Uint8Array(8)), b => A[b % 31]).join('');
+    const password = raw.slice(0, 4) + '-' + raw.slice(4);
+    if (!p.loginId) p.loginId = this.newLoginId();
+    p.ctHash = await sha256(p.loginId + ':' + password);
+    p.ctSessions = []; // a new password signs out their old devices
+    p.rev = this.bump(); p.updatedAt = Date.now();
+    this.dirty.add('c:participants'); this.flags.rev = true;
+    return password;
+  }
+  /** Can the contestant still change their own stage details? Until they've been on stage. */
+  selfEditable(p, c) { return !['on_stage', 'done', ...OUT_STATUSES].includes(p.status) && !c?.archived; }
+  /** What a contestant sees about their own entry (never judges, never anyone else). */
+  entryView(p, c) {
+    const ev = c.eventId ? this.db.data.events?.[c.eventId] : null;
+    return { contest: c.name, contestType: c.type || 'cosplay', eventName: ev && !ev.deleted ? ev.name || '' : '', number: p.number, name: p.name || '', character: p.character || '', title: p.title || '',
+      status: p.status, heat: (c.heats || 0) > 0 && p.status !== 'waitlisted' ? p.heat || null : null, waitlistPos: p.status === 'waitlisted' ? this.waitlistPos(p) : null,
+      photos: (p.photos || []).length, signupAt: p.signupAt, loginId: p.loginId || null,
+      pronunciation: p.pronunciation || '', intro: p.intro || '', editable: this.selfEditable(p, c),
+      ...(c.feedback?.released ? { feedback: this.feedbackFor(p, { comments: c.feedback.comments !== false }), heats: (c.heats || 0) > 0 } : {}) };
+  }
+  selfUpdate(p, c, body) {
+    if (!this.selfEditable(p, c)) throw new HttpError(409, 'You can\'t change this any more: your entry has been on stage, or the contest is closed. Ask the organizers.');
+    const changed = [];
+    for (const [k, max] of [['pronunciation', 120], ['intro', 600]]) {
+      if (body[k] === undefined) continue;
+      const v = String(body[k] ?? '').replace(/\s+$/g, '').slice(0, max);
+      if (v !== (p[k] || '')) { p[k] = v; changed.push(k === 'pronunciation' ? 'how to say their name' : 'intro'); }
+    }
+    if (changed.length) {
+      Object.assign(p, { rev: this.bump(), updatedAt: Date.now() });
+      this.dirty.add('c:participants'); this.flags.rev = true;
+      this.audit(null, 'participant.self', { contestId: c.id, target: p.id, label: `${p.title || p.name} updated ${changed.join(' and ')}` });
+    }
+    return changed;
+  }
+  async contestantFromToken(req) {
+    const tok = (req.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '');
+    if (!tok.startsWith('ct_')) throw new HttpError(401, 'Please sign in again');
+    const h = await sha256(tok), now = Date.now();
+    const p = Object.values(this.db.data.participants).find(x => !x.deleted && (x.ctSessions || []).some(t => t.h === h && t.exp > now));
+    const c = p && this.db.data.contests[p.contestId];
+    if (!p || !c || c.deleted) throw new HttpError(401, 'Your sign-in has expired. Please sign in again.');
+    return { p, c, h };
+  }
+
   /** 1 = next off the waitlist. Waitlisted entries are in the order they were waitlisted. */
   waitlistPos(p) {
     const w = Object.values(this.db.data.participants).filter(x => x.contestId === p.contestId && !x.deleted && x.status === 'waitlisted')
@@ -499,6 +555,7 @@ export class Contest {
       mine.push(now); hits.set(ip, mine);
       this.audit(null, 'participant.signup', { contestId: c.id, target: id, label: `${rec.title || rec.name} signed up${sg.review ? ' (waiting for review)' : ''}` });
       let emailed = false;
+      const ctPassword = await this.issueLogin(db.data.participants[id]);
       const base = this.appBase(body.appBase);
       if (rec.email && base) {
         const { contest, event } = this.contestBits(c);
@@ -512,10 +569,11 @@ export class Contest {
             rec.heat ? `You're in heat ${rec.heat}.` : '',
           ].filter(Boolean),
           button: { label: 'View or withdraw my entry', url: link },
-          after: ['Keep this email: the link above is private to you and is the only way to withdraw online.'],
+          after: ['Keep this email: the link above is private to you and is the only way to withdraw online.',
+            `You can also sign in as a contestant at ${base}me with ID ${rec.loginId} and password ${ctPassword}, to tell the emcee how to say your name, write your intro, and see your judges' feedback after the show.`],
         }), 'Sign-up email');
       }
-      return json(200, { ok: true, entry: id, token, number: rec.number, status: rec.status, heat: rec.heat || null, emailed });
+      return json(200, { ok: true, entry: id, token, number: rec.number, status: rec.status, heat: rec.heat || null, emailed, loginId: rec.loginId, password: ctPassword });
     }
     if (action === 'photo' && req.method === 'POST') {
       const p = await this.signupEntry(c, url);
@@ -534,9 +592,13 @@ export class Contest {
     }
     if (action === 'entry' && req.method === 'GET') {
       const p = await this.signupEntry(c, url);
-      return json(200, { contest: c.name, eventName: ev?.name || '', number: p.number, name: p.name || '', character: p.character || '', title: p.title || '',
-        status: p.status, heat: (c.heats || 0) > 0 && p.status !== 'waitlisted' ? p.heat || null : null, waitlistPos: p.status === 'waitlisted' ? this.waitlistPos(p) : null, photos: (p.photos || []).length, signupAt: p.signupAt,
-        ...(c.feedback?.released ? { feedback: this.feedbackFor(p, { comments: c.feedback.comments !== false }), heats: (c.heats || 0) > 0 } : {}) });
+      return json(200, this.entryView(p, c));
+    }
+    if (action === 'update' && req.method === 'POST') {
+      const body = await readBody(req, 20_000);
+      const p = await this.signupEntry(c, url, body);
+      this.selfUpdate(p, c, body);
+      return json(200, this.entryView(p, c));
     }
     if (action === 'withdraw' && req.method === 'POST') {
       const body = await readBody(req, 5000);
@@ -729,6 +791,7 @@ ${r.comments.length ? `<p style="margin:0 0 6px;font-size:13px;font-weight:700;l
   /** What a user may see of a record. null = nothing at all. */
   project(user, coll, rec) {
     if (coll === 'participants' && rec.withdrawHash) rec = strip(rec, 'withdrawHash'); // the contestant's private key never leaves the server
+    if (coll === 'participants' && (rec.ctHash || rec.ctSessions)) rec = strip(rec, 'ctHash', 'ctSessions'); // nor their sign-in
     if (user.role === 'admin') return rec;
     if (coll === 'settings') return rec;
     if (coll === 'events') return Object.values(this.db.data.contests).some(c => c.eventId === rec.id && this.roleIn(user, c.id)) ? rec : null;
@@ -1049,10 +1112,10 @@ ${r.comments.length ? `<p style="margin:0 0 6px;font-size:13px;font-weight:700;l
     const f = this.loginFails.get(key);
     return f && f.until > Date.now();
   }
-  noteFail(key) {
+  noteFail(key, limit = 5) {
     const f = this.loginFails.get(key);
-    const n = (f && f.until <= Date.now() && f.count >= 5 ? 0 : (f?.count || 0)) + 1;
-    this.loginFails.set(key, { count: n, until: n >= 5 ? Date.now() + 60000 : 0 });
+    const n = (f && f.until <= Date.now() && f.count >= limit ? 0 : (f?.count || 0)) + 1;
+    this.loginFails.set(key, { count: n, until: n >= limit ? Date.now() + 60000 : 0 });
     if (this.loginFails.size > 5000) this.loginFails.clear();
   }
   cleanContestRoles(map, base = {}) {
@@ -1131,6 +1194,63 @@ ${r.comments.length ? `<p style="margin:0 0 6px;font-size:13px;font-weight:700;l
       return json(200, { user: this.publicUser(u), serverTime: Date.now() });
     }
 
+    if (route === 'POST /api/contestant/login') {
+      const body = await readBody(req, 10_000);
+      const id = String(body.loginId || '').trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12);
+      const pw = String(body.password || '').trim().toLowerCase().replace(/\s+/g, '');
+      // Contestants share the venue's connection with staff: their mistakes never slow down staff sign-ins.
+      if (this.throttled('ctip:' + ip) || this.throttled('ct:' + id)) throw new HttpError(429, 'Too many attempts. Wait a minute and try again.');
+      const p = id && Object.values(db.data.participants).find(x => !x.deleted && x.loginId === id);
+      const c = p && db.data.contests[p.contestId];
+      const want = p?.ctHash, got = p ? await sha256(id + ':' + (pw.includes('-') ? pw : pw.slice(0, 4) + '-' + pw.slice(4))) : '';
+      if (!p || !c || c.deleted || !want || got !== want) {
+        this.noteFail('ctip:' + ip, 40); this.noteFail('ct:' + id);
+        throw new HttpError(401, 'That contestant ID and password don\'t match. Check the slip or email you were given.');
+      }
+      const token = 'ct_' + randHex(24);
+      const now = Date.now();
+      p.ctSessions = [...(p.ctSessions || []).filter(t => t.exp > now).slice(-4), { h: await sha256(token), exp: now + 60 * 86400_000 }];
+      this.dirty.add('c:participants');
+      return json(200, { token, entry: this.entryView(p, c) });
+    }
+    if (route === 'GET /api/contestant/me') { const { p, c } = await this.contestantFromToken(req); return json(200, this.entryView(p, c)); }
+    if (route === 'POST /api/contestant/me') {
+      const { p, c } = await this.contestantFromToken(req);
+      this.selfUpdate(p, c, await readBody(req, 20_000));
+      return json(200, this.entryView(p, c));
+    }
+    if (route === 'POST /api/contestant/logout') {
+      try { const { p, h } = await this.contestantFromToken(req); p.ctSessions = (p.ctSessions || []).filter(t => t.h !== h); this.dirty.add('c:participants'); } catch { /* already signed out */ }
+      return json(200, { ok: true });
+    }
+    if (route === 'POST /api/contestants/logins') {
+      // Leads and admins: make contestant logins (or new passwords), optionally emailing them.
+      // Passwords are returned once, here; only hashes are kept.
+      const u = await this.requireUser(req);
+      const body = await readBody(req, 100_000);
+      const c = db.data.contests[String(body.contestId || '')];
+      if (!c || c.deleted) throw new HttpError(404, 'No such contest');
+      if (!this.manages(u, c.id)) throw new HttpError(403, 'Only the contest lead or an admin can make contestant logins');
+      const ids = Array.isArray(body.ids) ? new Set(body.ids.map(String)) : null;
+      const base = this.appBase(body.appBase);
+      const wantEmail = !!body.email && this.emailOn && base;
+      let list = Object.values(db.data.participants).filter(p => p.contestId === c.id && !p.deleted && !['withdrawn', 'declined'].includes(p.status) && (ids ? ids.has(p.id) : !p.ctHash));
+      if (wantEmail) list = list.filter(p => validEmail(p.email)).slice(0, 20); // a batch: the app calls again for the rest
+      const out = [];
+      const { contest, event } = this.contestBits(c);
+      for (const p of list) {
+        const password = await this.issueLogin(p);
+        let emailed = false;
+        if (wantEmail) emailed = await this.mail(p.email, `Your contestant sign-in: ${contest}`, message({ kicker: event || contest, title: `Your contestant sign-in`, big: p.number ? '#' + p.number : '',
+          lines: [`${p.title || p.name || ''}${p.character ? ` as ${p.character}` : ''} · ${contest}${event ? ` at ${event}` : ''}`, `Contestant ID: ${p.loginId}`, `Password: ${password}`,
+            'Sign in to tell the emcee how to say your name, write your intro, and see your judges\' feedback after the show.'],
+          button: { label: 'Sign in', url: `${base}me/${p.loginId}` } }), 'Contestant login email');
+        out.push({ id: p.id, number: p.number, name: p.name || '', character: p.character || '', title: p.title || '', email: p.email || '', loginId: p.loginId, password, emailed });
+      }
+      if (out.length) this.audit(u, 'contestant.logins', { contestId: c.id, label: `${out.length} contestant login${out.length === 1 ? '' : 's'} ${ids ? 'reset' : 'made'}${wantEmail ? `, ${out.filter(x => x.emailed).length} emailed` : ''}` });
+      const remaining = wantEmail ? Object.values(db.data.participants).filter(p => p.contestId === c.id && !p.deleted && !['withdrawn', 'declined'].includes(p.status) && !p.ctHash && validEmail(p.email) && (!ids || ids.has(p.id))).length : 0;
+      return json(200, { logins: out, remaining });
+    }
     if (route === 'POST /api/feedback/email') {
       // Leads and admins: email feedback to contestants who left an email. In batches (the app calls until done),
       // because each email is one outgoing request and Cloudflare limits those per request.
