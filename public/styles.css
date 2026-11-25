@@ -557,3 +557,14 @@ ol.steps { margin: 0; padding-left: 1.3rem; } ol.steps li { margin: .2rem 0; }
 .transfer-row { align-items: flex-start; padding: 8px 10px; background: var(--panel-3); }
 .transfer-row input { margin-top: 4px; }
 .dl-list { gap: 6px; } .dl-list .btn { font-size: 12px; }
+
+/* Events */
+.event-row .event-name { width: 100%; max-width: 420px; padding: 6px 8px; font-weight: 800; font-size: 16px; background: transparent; border: 1px solid transparent; }
+.event-row .event-name:hover, .event-row .event-name:focus { border-color: var(--line-2); background: var(--panel); }
+tr.event-head td { padding-top: 14px; font-size: 12px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; color: var(--cyan); border-bottom: 1px solid var(--line-2); }
+select.move-event { width: auto; max-width: 160px; padding: 4px 26px 4px 8px; font-size: 12px; }
+
+/* Organizations */
+.org-field span { font-size: 12px; }
+.chip .org-tag { margin-left: 6px; padding: 0 5px; font-size: 10px; letter-spacing: .08em; background: var(--panel); color: var(--muted); }
+pre.handover { margin: 0; padding: 12px; white-space: pre-wrap; font: 600 14px/1.6 ui-monospace, Menlo, Consolas, monospace; background: var(--panel-3); border-left: 3px solid var(--cyan); }

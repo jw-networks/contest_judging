@@ -89,7 +89,7 @@ const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; cha
  * routes: { '/path': (req, res) => void } extra plain-Node routes.
  * files: { '/config.js': () => string } files served from memory instead of public/.
  */
-export function serve({ worker, envFor, dobj, sockets, publicDir, port, host, tls, originOK, requestOK = () => true, routes = {}, files = {}, onListen }) {
+export function serve({ worker, envFor, dobj, sockets, wsTarget, publicDir, port, host, tls, originOK, requestOK = () => true, routes = {}, files = {}, onListen }) {
   const handler = async (req, res) => {
     try {
       if (!requestOK(req)) { res.writeHead(403, { 'Content-Type': 'text/plain' }); return res.end('Use this server by its IP address or local name.'); }
@@ -118,9 +118,16 @@ export function serve({ worker, envFor, dobj, sockets, publicDir, port, host, tl
     }
   };
   const server = tls ? https.createServer(tls, handler) : http.createServer(handler);
-  server.on('upgrade', (req, socket) => {
-    if (new URL(req.url, 'http://x').pathname === '/api/ws') wsAccept(req, socket, { sockets, dobj, originOK });
-    else socket.destroy();
+  // wsTarget(req) -> { dobj, sockets } picks the organization's database (multi-org dev server); else the one database.
+  server.on('upgrade', async (req, socket) => {
+    if (new URL(req.url, 'http://x').pathname !== '/api/ws') return socket.destroy();
+    try {
+      const t = wsTarget ? await wsTarget(req) : { dobj, sockets };
+      // A brand-new default database sets itself up on first use; let a live connection be that first use.
+      if (t && !t.dobj?.contest?.db && t.dobj?.fresh && t.dobj.orgId === 'main') await t.dobj.ctx.blockConcurrencyWhile(() => t.dobj.setupDefault());
+      if (!t || !t.dobj?.contest?.db) return socket.destroy();
+      wsAccept(req, socket, { ...t, originOK });
+    } catch { socket.destroy(); }
   });
   server.listen(port, host, () => onListen?.(server));
   return server;

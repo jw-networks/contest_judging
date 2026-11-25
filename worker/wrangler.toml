@@ -7,10 +7,19 @@ workers_dev = true
 name = "CONTEST"
 class_name = "ContestDB"
 
+# The list of organizations (each organization gets its own ContestDB)
+[[durable_objects.bindings]]
+name = "DIRECTORY"
+class_name = "Directory"
+
 # Free plan requires SQLite-backed Durable Objects
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["ContestDB"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["Directory"]
 
 [vars]
 # The GitHub Pages site allowed to call this API (comma-separate several)
@@ -21,6 +30,10 @@ DATA_BRANCH = "main"
 DATA_PATH = "db.json"
 # How often (at most) changes are pushed to GitHub
 FLUSH_SECONDS = "30"
+# Organizations: admins of the default org with these usernames run the Spotlight platform (create/suspend orgs)
+PLATFORM_ADMINS = "admin"
+# Sign-in code of the original (default) organization; devices that never enter a code use it
+DEFAULT_ORG_CODE = "main"
 
 # Secrets (never put these in this file):
 #   DATA_REPO_TOKEN  fine-grained GitHub token, Contents: read & write on the data repo only

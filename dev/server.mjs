@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import worker, { ContestDB } from '../worker/src/index.js';
+import worker, { ContestDB, Directory } from '../worker/src/index.js';
 import { durableContext, serve } from '../local/runtime.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -29,13 +29,25 @@ const revive = (k, v) => (v && typeof v === 'object' && typeof v.__u8 === 'strin
 const replace = (k, v) => (v instanceof Uint8Array ? { __u8: Buffer.from(v).toString('base64') } : v);
 const mem = new Map(fs.existsSync(storeFile) ? Object.entries(JSON.parse(fs.readFileSync(storeFile, 'utf8'), revive)) : []);
 const persist = () => fs.writeFileSync(storeFile, JSON.stringify(Object.fromEntries(mem), replace));
-const { ctx, sockets, holder } = durableContext({
-  get: k => mem.get(k),
-  set: (k, v) => { mem.set(k, v); persist(); },
-  setMany: list => { list.forEach(([k, v]) => mem.set(k, v)); persist(); },
-  delete: k => { mem.delete(k); persist(); },
-  deleteMany: keys => { keys.forEach(k => mem.delete(k)); persist(); },
-});
+// One Durable Object per name (each organization's database, and the directory), sharing the JSON file with a
+// key prefix per object. The default org ('main') keeps unprefixed keys.
+const instances = new Map();
+function durable(name, Cls) {
+  if (!instances.has(name)) {
+    const ns = name === 'main' ? '' : name + '|';
+    const { ctx, sockets, holder } = durableContext({
+      get: k => mem.get(ns + k),
+      set: (k, v) => { mem.set(ns + k, v); persist(); },
+      setMany: list => { list.forEach(([k, v]) => mem.set(ns + k, v)); persist(); },
+      delete: k => { mem.delete(ns + k); persist(); },
+      deleteMany: keys => { keys.forEach(k => mem.delete(ns + k)); persist(); },
+    });
+    const obj = new Cls(ctx, env);
+    holder.dobj = obj;
+    instances.set(name, { obj, sockets });
+  }
+  return instances.get(name);
+}
 
 // ---------- fake GitHub contents API backed by dev/.data/github/
 const ghFile = path.join(DATA, 'github', 'db.json');
@@ -68,16 +80,27 @@ const env = {
   FLUSH_SECONDS: process.env.FLUSH_SECONDS || '10',
   DATA_REPO_TOKEN: 'dev-token',
   ADMIN_PASSWORD: process.env.ADMIN_PASSWORD,
+  PLATFORM_ADMINS: process.env.PLATFORM_ADMINS || 'admin',
+  DEFAULT_ORG_CODE: process.env.DEFAULT_ORG_CODE || 'main',
   FETCH: fakeGitHub,
 };
-const dobj = new ContestDB(ctx, env);
-holder.dobj = dobj;
-env.CONTEST = { idFromName: () => 'main', get: () => dobj };
+env.CONTEST = { idFromName: n => n, get: n => durable(n, ContestDB).obj };
+env.DIRECTORY = { idFromName: n => n, get: n => durable('dir:' + n, Directory).obj };
+const dobj = env.CONTEST.get('main');
 
 // ---------- http + WebSocket (shared with the local network server)
 const allowed = () => env.ALLOWED_ORIGINS.split(',');
+// Live updates: find the organization's database the same way the edge does.
+async function wsTarget(req) {
+  const code = new URL(req.url, 'http://x').searchParams.get('org') || '';
+  const r = await env.DIRECTORY.get('directory').fetch(new Request('https://directory/resolve?code=' + encodeURIComponent(code)));
+  const { org } = await r.json();
+  if (!org || org.suspended) return null;
+  const { obj, sockets } = durable(org.id === 'main' ? 'main' : 'org:' + org.id, ContestDB);
+  return { dobj: obj, sockets };
+}
 serve({
-  worker, dobj, sockets, publicDir: PUBLIC, port: PORT,
+  worker, wsTarget, publicDir: PUBLIC, port: PORT,
   envFor: () => env,
   originOK: origin => !origin || allowed().includes(origin),
   routes: { '/__dev/github-log': (req, res) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(ghLog)); } },

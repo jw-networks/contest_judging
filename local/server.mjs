@@ -104,6 +104,9 @@ const env = {
 const dobj = new ContestDB(ctx, env);
 holder.dobj = dobj;
 env.CONTEST = { idFromName: () => 'main', get: () => dobj };
+// Set the database up now (first run: creates it with the admin password above), so the first device to
+// connect finds it ready.
+await worker.fetch(new Request('http://localhost/api/stage'), env).catch(e => console.error('startup', e));
 // The Worker allows only listed origins; allow this request's own address when it passes the checks above.
 const envFor = req => {
   const o = req.headers.origin;

@@ -66,6 +66,16 @@ On each tablet, open the same address and choose **Add to Home Screen / Install 
 
 After this, pushing changes to `public/` redeploys the app, and pushing changes to `worker/` redeploys the Worker, automatically.
 
+## Organizations and events
+
+Spotlight is organized as **organization → events → contests**.
+
+- **Organizations** are your customers (and you). Each has its **own separate database** (its own Durable Object), its own admins and staff accounts, and its own events. Accounts never cross organizations: the same username in two orgs is two different people.
+- **Signing in:** staff enter the organization's **code** on the sign-in screen once per device (it's remembered), or open its link, `https://<pages-site>/#/o/<code>`. A monitor link for another org works without signing in: `#/o/<code>/monitor/<contestId>`. Devices that never enter a code use the **default organization**, which is the original database, so everything set up before organizations existed keeps working unchanged.
+- **Events:** each contest belongs to an event. **Admin → Events** creates, renames and archives them (archiving an event hides its contests from everyone but admins). The event name shows in the title bar and on the monitors. The contest picker groups contests by event.
+- **Platform admins** (admins of the default org whose usernames are in the `PLATFORM_ADMINS` Worker variable) get a globe icon → **Spotlight platform**: create an organization (name, code, first admin, first event; you get a sign-in message with a temporary password to send them), rename it, change its code, reset an account's password, and suspend or reactivate it. The default org can't be suspended.
+- **Storage:** the default org is also copied to the GitHub data repo, as before. Other organizations are stored by Cloudflare (Durable Object storage); per-organization cloud backups are a planned next step.
+
 ## Contests and who sees what
 
 Spotlight runs **several contests side by side**, for example a Saturday masquerade, a kids' contest and a makers showcase. Each contest has its own contestants or entries, criteria, divisions or categories, scores, stage timer, results and audit log.

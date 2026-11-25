@@ -15,6 +15,36 @@
 import { Contest, HttpError, json } from './core.js';
 
 // ---------------------------------------------------------------- edge worker
+// Organizations: each one has its own Durable Object (its own database). The DIRECTORY Durable Object lists
+// them by code. Requests name their org with the X-Spotlight-Org header or ?org= (WebSockets, monitors);
+// no org = the default org, which is the original single database ('main'), so existing devices keep working.
+// Without a DIRECTORY binding (the local network server) there is just the one database.
+export const DEFAULT_ORG = 'main';
+const INTERNAL = 'X-Spotlight-Internal', ORG_ID = 'X-Spotlight-Org-Id';
+const orgCache = new Map(); // code -> { org, at } (per isolate; 20 s)
+
+export async function directory(env, path, body) {
+  const stub = env.DIRECTORY.get(env.DIRECTORY.idFromName('directory'));
+  const res = await stub.fetch(new Request('https://directory' + path, { method: body ? 'POST' : 'GET', headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined }));
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new HttpError(res.status, data.error || 'Directory error');
+  return data;
+}
+async function resolveOrg(env, code) {
+  code = String(code || '').trim().toLowerCase();
+  if (!env.DIRECTORY) return { id: DEFAULT_ORG, code: '', default: true };
+  const hit = orgCache.get(code);
+  if (hit && Date.now() - hit.at < 20000) return hit.org;
+  const { org } = await directory(env, '/resolve?code=' + encodeURIComponent(code));
+  orgCache.set(code, { org, at: Date.now() });
+  return org;
+}
+export const orgStub = (env, orgId) => env.CONTEST.get(env.CONTEST.idFromName(orgId === DEFAULT_ORG ? DEFAULT_ORG : 'org:' + orgId));
+// A request from the edge to an org's database, marked as internal (clients can never set these headers).
+export function internalCall(env, orgId, path, { method = 'GET', body, headers = {} } = {}) {
+  return orgStub(env, orgId).fetch(new Request('https://org' + path, { method, headers: { ...headers, [INTERNAL]: '1', [ORG_ID]: orgId, ...(body ? { 'Content-Type': 'application/json' } : {}) }, body: body ? JSON.stringify(body) : undefined }));
+}
+
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
@@ -30,8 +60,24 @@ export default {
 
     if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: corsHeaders(origin) });
 
-    const stub = env.CONTEST.get(env.CONTEST.idFromName('main'));
-    const res = await stub.fetch(req);
+    let res;
+    try {
+      if (url.pathname.startsWith('/api/platform/')) res = await platform(req, env, url);
+      else {
+        const org = await resolveOrg(env, req.headers.get('X-Spotlight-Org') || url.searchParams.get('org'));
+        if (!org) res = json(404, { error: 'No organization with that code. Check the code and try again.' });
+        else if (org.suspended) res = json(403, { error: 'This organization is suspended. Contact Spotlight support.' });
+        else {
+          // Forward with our own markers only: drop any a client tried to send.
+          const headers = new Headers(req.headers);
+          headers.delete(INTERNAL); headers.set(ORG_ID, org.id);
+          res = await orgStub(env, org.id).fetch(new Request(req, { headers }));
+        }
+      }
+    } catch (e) {
+      res = json(e instanceof HttpError ? e.status : 500, { error: e instanceof HttpError ? e.message : 'Server error' });
+      if (!(e instanceof HttpError)) console.error(e);
+    }
     if (res.status === 101) return res; // WebSocket upgrade
     const out = new Response(res.body, res);
     if (okOrigin) for (const [k, v] of Object.entries(corsHeaders(origin))) out.headers.set(k, v);
@@ -41,10 +87,116 @@ export default {
   },
 };
 
+// ---------------------------------------------------------------- platform (Spotlight's own super-admin)
+// Platform admins are admins of the default org whose usernames are listed in PLATFORM_ADMINS (default "admin").
+const ORG_CODE = /^[a-z0-9](?:[a-z0-9-]{0,28}[a-z0-9])?$/;
+async function platform(req, env, url) {
+  if (!env.DIRECTORY) throw new HttpError(404, 'Organizations are not available on this server');
+  const who = await internalCall(env, DEFAULT_ORG, '/api/internal/whoami', { headers: { Authorization: req.headers.get('Authorization') || '' } });
+  const me = await who.json().catch(() => ({}));
+  if (!who.ok || !me.user?.platform) throw new HttpError(who.status === 401 ? 401 : 403, who.status === 401 ? 'Sign in again' : 'Only Spotlight platform admins can do this');
+  // /api/platform/orgs[/<id>[/<action>]]
+  const [, , , what, id, action] = url.pathname.split('/');
+  const route = `${req.method} /api/platform/${what}${id ? '/:id' : ''}${action ? '/' + action : ''}`;
+  const body = ['POST', 'PATCH'].includes(req.method) ? await req.json().catch(() => ({})) : {};
+  const stats = async org => { try { const r = await internalCall(env, org.id, '/api/internal/stats'); return r.ok ? await r.json() : null; } catch { return null; } };
+
+  if (route === 'GET /api/platform/orgs') {
+    const { orgs } = await directory(env, '/list');
+    return json(200, { orgs: await Promise.all(orgs.map(async o => ({ ...o, stats: await stats(o) }))) });
+  }
+  if (route === 'POST /api/platform/orgs') {
+    const code = String(body.code || '').trim().toLowerCase(), name = String(body.name || '').trim().slice(0, 120);
+    const adminUsername = String(body.adminUsername || 'admin').trim().toLowerCase();
+    if (!name) throw new HttpError(400, 'Give the organization a name');
+    if (!ORG_CODE.test(code)) throw new HttpError(400, 'Codes are 1–30 lowercase letters, numbers and dashes');
+    if (!/^[a-z0-9._-]{2,40}$/.test(adminUsername)) throw new HttpError(400, 'Admin username: 2–40 letters, numbers, dots, dashes or underscores');
+    const { org } = await directory(env, '/create', { code, name, by: me.user.username });
+    const tempPassword = randomPassword();
+    const r = await internalCall(env, org.id, '/api/internal/setup', { method: 'POST', body: { password: tempPassword, username: adminUsername, displayName: String(body.adminName || 'Administrator').slice(0, 80), eventName: String(body.eventName || '').slice(0, 120) } });
+    if (!r.ok) throw new HttpError(500, 'Created the organization but could not set up its database: ' + ((await r.json().catch(() => ({}))).error || r.status));
+    orgCache.clear();
+    return json(200, { org: { ...org, stats: await stats(org) }, admin: { username: adminUsername, tempPassword } });
+  }
+  if (route === 'PATCH /api/platform/orgs/:id') {
+    const patch = {};
+    if (body.name !== undefined) { patch.name = String(body.name).trim().slice(0, 120); if (!patch.name) throw new HttpError(400, 'Name can\'t be empty'); }
+    if (body.code !== undefined) { patch.code = String(body.code).trim().toLowerCase(); if (!ORG_CODE.test(patch.code)) throw new HttpError(400, 'Codes are 1–30 lowercase letters, numbers and dashes'); }
+    if (body.suspended !== undefined) patch.suspended = !!body.suspended;
+    const { org } = await directory(env, '/update', { id, patch, by: me.user.username });
+    orgCache.clear();
+    return json(200, { org: { ...org, stats: await stats(org) } });
+  }
+  if (route === 'POST /api/platform/orgs/:id/reset') {
+    const { orgs } = await directory(env, '/list');
+    const org = orgs.find(o => o.id === id);
+    if (!org) throw new HttpError(404, 'No such organization');
+    const r = await internalCall(env, org.id, '/api/internal/reset', { method: 'POST', body: { username: body.username || 'admin' } });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new HttpError(r.status, d.error || 'Reset failed');
+    return json(200, d);
+  }
+  throw new HttpError(404, 'Unknown endpoint');
+}
+function randomPassword() {
+  const abc = 'abcdefghjkmnpqrstuvwxyz23456789';
+  const b = crypto.getRandomValues(new Uint8Array(12));
+  return Array.from(b, x => abc[x % abc.length]).join('').replace(/(.{4})(?!$)/g, '$1-');
+}
+
+// ---------------------------------------------------------------- the directory of organizations
+export class Directory {
+  constructor(ctx, env) { this.ctx = ctx; this.env = env; }
+  async orgs() {
+    let orgs = await this.ctx.storage.get('orgs');
+    if (!orgs) {
+      // The original single database becomes the default organization.
+      orgs = { [DEFAULT_ORG]: { id: DEFAULT_ORG, code: (this.env.DEFAULT_ORG_CODE || 'main').toLowerCase(), name: this.env.DEFAULT_ORG_NAME || 'My organization', default: true, suspended: false, createdAt: Date.now() } };
+      await this.ctx.storage.put('orgs', orgs);
+    }
+    return orgs;
+  }
+  async fetch(req) {
+    const url = new URL(req.url);
+    const body = req.method === 'POST' ? await req.json().catch(() => ({})) : {};
+    try {
+      const orgs = await this.orgs();
+      const list = Object.values(orgs);
+      if (url.pathname === '/resolve') {
+        const code = (url.searchParams.get('code') || '').toLowerCase();
+        const org = code ? list.find(o => o.code === code) : orgs[DEFAULT_ORG];
+        return json(200, { org: org ? { id: org.id, code: org.code, name: org.name, suspended: !!org.suspended, default: !!org.default } : null });
+      }
+      if (url.pathname === '/list') return json(200, { orgs: list.sort((a, b) => (b.default ? 1 : 0) - (a.default ? 1 : 0) || a.name.localeCompare(b.name)) });
+      if (url.pathname === '/create') {
+        if (list.some(o => o.code === body.code)) throw new HttpError(409, `The code "${body.code}" is already taken`);
+        const id = crypto.randomUUID().replace(/-/g, '').slice(0, 16);
+        const org = { id, code: body.code, name: body.name, default: false, suspended: false, createdAt: Date.now(), createdBy: body.by || '' };
+        orgs[id] = org;
+        await this.ctx.storage.put('orgs', orgs);
+        return json(200, { org });
+      }
+      if (url.pathname === '/update') {
+        const org = orgs[body.id];
+        if (!org) throw new HttpError(404, 'No such organization');
+        const p = body.patch || {};
+        if (p.code !== undefined && p.code !== org.code && list.some(o => o.code === p.code)) throw new HttpError(409, `The code "${p.code}" is already taken`);
+        if (p.suspended && org.default) throw new HttpError(400, 'The default organization can\'t be suspended');
+        Object.assign(org, p, { updatedAt: Date.now(), updatedBy: body.by || '' });
+        await this.ctx.storage.put('orgs', orgs);
+        return json(200, { org });
+      }
+      throw new HttpError(404, 'Unknown directory call');
+    } catch (e) {
+      return json(e instanceof HttpError ? e.status : 500, { error: e instanceof HttpError ? e.message : 'Directory error' });
+    }
+  }
+}
+
 function corsHeaders(origin) {
   return {
     'Access-Control-Allow-Origin': origin,
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Spotlight-Org',
     'Access-Control-Allow-Methods': 'GET, POST, PATCH, DELETE, OPTIONS',
     'Access-Control-Max-Age': '600',
     Vary: 'Origin',
@@ -117,8 +269,14 @@ export class ContestDB {
     this.env = env;
     this.gh = new GitHubFile(env, env.FETCH || ((...a) => fetch(...a))); // FETCH is only used by the local dev server's fake GitHub
     this.flushMs = Math.max(10, Number(env.FLUSH_SECONDS) || 30) * 1000;
-    this.contest = new Contest(this.storeAdapter(), { broadcast: (t, d) => this.broadcast(t, d), local: !!env.LOCAL_MODE });
+    this.orgId = DEFAULT_ORG; // read from storage in init(); databases made before organizations are the default org
+    const platformAdmins = String(env.PLATFORM_ADMINS || 'admin').split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
+    this.contest = new Contest(this.storeAdapter(), {
+      broadcast: (t, d) => this.broadcast(t, d), local: !!env.LOCAL_MODE,
+      isPlatform: u => !!env.DIRECTORY && this.orgId === DEFAULT_ORG && u.role === 'admin' && u.active !== false && platformAdmins.includes(u.username),
+    });
     this.initError = null;
+    this.fresh = false;
     try { ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair('ping', 'pong')); } catch { /* older runtime */ }
     ctx.blockConcurrencyWhile(() => this.init());
   }
@@ -135,11 +293,27 @@ export class ContestDB {
     };
   }
 
+  // GitHub mirroring is for the default org only (other orgs: Spotlight-managed storage).
+  get gitHubOn() { return this.orgId === DEFAULT_ORG && this.gh.configured; }
+
   async init() {
     this.initError = null;
     try {
+      this.orgId = (await this.ctx.storage.get('orgId')) || DEFAULT_ORG;
       if (await this.contest.load()) return;
-      // Fresh Durable Object: restore from GitHub if a snapshot exists, otherwise start new.
+      this.fresh = true; // set up on first use: the default org seeds itself; other orgs wait for the platform's setup call
+    } catch (e) {
+      console.error('init failed', e);
+      this.initError = e.message || String(e);
+      this.contest.db = null;
+    }
+  }
+
+  // Default org only: restore from GitHub if a snapshot exists, otherwise start new with ADMIN_PASSWORD.
+  async setupDefault() {
+    if (this.contest.db) return;
+    this.initError = null;
+    try {
       let snap = null;
       if (this.gh.configured) snap = await this.gh.read();
       if (snap) {
@@ -149,6 +323,7 @@ export class ContestDB {
         await this.contest.seed(this.env.ADMIN_PASSWORD);
         await this.scheduleFlush();
       }
+      this.fresh = false;
     } catch (e) {
       // Never start an empty database because GitHub was briefly unreachable: report and retry on the next request.
       console.error('init failed', e);
@@ -158,10 +333,28 @@ export class ContestDB {
   }
 
   async fetch(req) {
-    if (!this.contest.db) await this.ctx.blockConcurrencyWhile(() => this.init());
+    const url = new URL(req.url);
+    // Only the edge sets these (it strips them from client requests).
+    const internal = req.headers.get(INTERNAL) === '1';
+    const orgId = req.headers.get(ORG_ID) || DEFAULT_ORG;
+    if (!this.contest.db && !this.fresh) await this.ctx.blockConcurrencyWhile(() => this.init());
+    if (this.fresh && !this.contest.db) {
+      if (orgId === DEFAULT_ORG && !(await this.ctx.storage.get('orgId'))) await this.ctx.blockConcurrencyWhile(() => this.setupDefault());
+      else if (internal && url.pathname === '/api/internal/setup') return this.setupOrg(req, orgId);
+      else return json(503, { error: 'This organization has not been set up yet.' });
+    }
     if (!this.contest.db) return json(503, { error: 'Server is starting up: ' + this.initError });
 
-    const url = new URL(req.url);
+    if (url.pathname.startsWith('/api/internal/')) {
+      if (!internal) return json(404, { error: 'Unknown endpoint' });
+      try {
+        if (url.pathname === '/api/internal/whoami') return json(200, { user: this.contest.publicUser(await this.contest.requireUser(req)) });
+        if (url.pathname === '/api/internal/stats') return json(200, this.contest.stats());
+        if (url.pathname === '/api/internal/reset') return json(200, await this.contest.resetAccountPassword((await req.json()).username));
+        if (url.pathname === '/api/internal/setup') return json(409, { error: 'Already set up' });
+      } catch (e) { return json(e.status || 500, { error: e.message || 'Server error' }); }
+      return json(404, { error: 'Unknown endpoint' });
+    }
     if (url.pathname === '/api/ws') {
       if (req.headers.get('Upgrade') !== 'websocket') return json(426, { error: 'Expected WebSocket' });
       const pair = new WebSocketPair();
@@ -183,6 +376,21 @@ export class ContestDB {
     return res;
   }
 
+  // A new organization's database: first admin (temporary password), one empty event with a contest.
+  async setupOrg(req, orgId) {
+    const body = await req.json().catch(() => ({}));
+    return this.ctx.blockConcurrencyWhile(async () => {
+      if (this.contest.db) return json(409, { error: 'Already set up' });
+      try {
+        await this.ctx.storage.put('orgId', orgId);
+        this.orgId = orgId;
+        await this.contest.seed(body.password, { username: body.username || 'admin', displayName: body.displayName || 'Administrator', eventName: body.eventName || '' });
+        this.fresh = false;
+        return json(200, { ok: true });
+      } catch (e) { return json(400, { error: e.message }); }
+    });
+  }
+
   broadcast(type, data) {
     const msg = JSON.stringify({ type, ...data });
     for (const ws of this.ctx.getWebSockets()) { try { ws.send(msg); } catch { /* closed */ } }
@@ -192,7 +400,7 @@ export class ContestDB {
   webSocketError() { }
 
   async scheduleFlush(delay = this.flushMs) {
-    if (!this.gh.configured) return;
+    if (!this.gitHubOn) return;
     const at = await this.ctx.storage.getAlarm();
     if (!at) await this.ctx.storage.setAlarm(Date.now() + delay);
   }
@@ -226,11 +434,11 @@ export class ContestDB {
   async githubAdmin(req) {
     try {
       const admin = await this.contest.requireUser(req, 'admin');
-      const status = async () => ({ ...((await this.ctx.storage.get('gh')) || {}), rev: this.contest.rev, repo: this.gh.repo, path: this.gh.path, branch: this.gh.branch, configured: this.gh.configured, flushSeconds: this.flushMs / 1000, local: !!this.env.LOCAL_MODE });
+      const status = async () => ({ ...((await this.ctx.storage.get('gh')) || {}), rev: this.contest.rev, repo: this.gh.repo, path: this.gh.path, branch: this.gh.branch, configured: this.gitHubOn, flushSeconds: this.flushMs / 1000, local: !!this.env.LOCAL_MODE, managed: this.orgId !== DEFAULT_ORG });
       if (req.method === 'GET') return json(200, await status());
       if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed');
       const body = await req.json().catch(() => ({}));
-      if (!this.gh.configured) throw new HttpError(400, 'GitHub data repo is not configured on the Worker');
+      if (!this.gitHubOn) throw new HttpError(400, 'GitHub data repo is not configured on the Worker');
       if (body.action === 'push') {
         try { await this.pushToGitHub(true); } catch (e) { throw new HttpError(502, e.message); }
         return json(200, await status());

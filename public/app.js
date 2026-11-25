@@ -89,6 +89,7 @@ const ICONS = {
   photo: '<rect x="3" y="5" width="18" height="15"/><circle cx="12" cy="12.5" r="3.5"/><path d="M8 5l1.5-2h5L16 5"/>',
   caret: '<path d="M7 10l5 5 5-5"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
+  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9c-2.5-2.6-3.8-5.6-3.8-9S9.5 5.6 12 3z"/>',
 };
 function icon(name) {
   const s = document.createElement('span');
@@ -130,7 +131,7 @@ async function pbkdf2(password, saltHex, iterations = 150000) {
 const randHex = n => Array.from(crypto.getRandomValues(new Uint8Array(n)), b => b.toString(16).padStart(2, '0')).join('');
 
 // ============================================================ app state
-const EMPTY = () => ({ settings: {}, contests: {}, criteria: {}, participants: {}, scores: {}, stage: {}, users: {}, audit: {} });
+const EMPTY = () => ({ settings: {}, events: {}, contests: {}, criteria: {}, participants: {}, scores: {}, stage: {}, users: {}, audit: {} });
 const S = {
   account: null,      // { username, user, token }
   rev: 0,
@@ -143,6 +144,21 @@ const S = {
 };
 const ui = { ci: { q: '', filter: 'all', division: 'all' }, judgeSel: null, reviewSel: null, includeDrafts: false, auditQ: '', newUser: { kind: 'member', crole: 'judge' }, newContest: null, eventNameDraft: undefined, eventDraft: {}, importText: '' };
 
+// ---------- organizations
+// Which organization this device talks to: the signed-in account's, else the code typed on the sign-in screen
+// (remembered per device). '' = the default organization. A #/o/<code>/monitor link can show another org's
+// monitor without signing in (ui.orgOverride). The local network server has just one organization.
+function orgCode() {
+  if (CFG.local) return '';
+  if (ui.orgOverride != null) return ui.orgOverride;
+  if (S.account) return S.account.org || '';
+  return localStorage.getItem('cj-org') || '';
+}
+const accKey = (org, uname) => (org ? org + '/' : '') + String(uname).toLowerCase(); // device storage key per org + user
+const orgHeaders = (extra = {}) => ({ ...extra, ...(orgCode() ? { 'X-Spotlight-Org': orgCode() } : {}) });
+const authHeaders = (extra = {}) => orgHeaders({ ...extra, ...(S.account?.token ? { Authorization: 'Bearer ' + S.account.token } : {}) });
+const monitorHref = cid => (orgCode() ? `#/o/${orgCode()}/monitor/` : '#/monitor/') + (cid || '');
+
 function serverBase() {
   return (localStorage.getItem('cj-server') ?? CFG.serverUrl ?? '').replace(/\/+$/, '');
 }
@@ -151,18 +167,18 @@ const serverNow = () => Date.now() + S.clockOffset;
 const isAdmin = () => S.account?.user.role === 'admin';
 const roleIn = cid => isAdmin() ? 'admin' : (S.account?.user.contests || {})[cid] || null;
 const myContests = () => Object.values(S.data.contests)
-  .filter(c => !c.deleted && (isAdmin() || ((S.account?.user.contests || {})[c.id] && !c.archived)))
-  .sort((a, b) => (!!a.archived - !!b.archived) || (a.order ?? 0) - (b.order ?? 0) || String(a.name).localeCompare(b.name));
+  .filter(c => !c.deleted && (isAdmin() || ((S.account?.user.contests || {})[c.id] && !c.archived && !eventOf(c)?.archived)))
+  .sort((a, b) => (!!a.archived - !!b.archived) || (eventOf(b)?.order ?? 0) - (eventOf(a)?.order ?? 0) || (a.order ?? 0) - (b.order ?? 0) || String(a.name).localeCompare(b.name));
 function curId() {
   const list = myContests().filter(c => !c.archived);
-  const saved = S.account && localStorage.getItem('cj-contest-' + S.account.username);
+  const saved = S.account && localStorage.getItem('cj-contest-' + accKey(S.account.org, S.account.username));
   if (ui.contestId && list.some(c => c.id === ui.contestId)) return ui.contestId;
   if (saved && list.some(c => c.id === saved)) return (ui.contestId = saved);
   return (ui.contestId = list[0]?.id || null);
 }
 function setContest(id) {
   ui.contestId = id;
-  if (S.account) localStorage.setItem('cj-contest-' + S.account.username, id);
+  if (S.account) localStorage.setItem('cj-contest-' + accKey(S.account.org, S.account.username), id);
   ui.judgeSel = null; ui.ci = { q: '', filter: 'all', division: 'all' }; ui.eventDraft = {}; ui.importText = '';
   location.hash = '#/' + home();
   render();
@@ -171,7 +187,11 @@ const role = () => roleIn(curId());                      // my role in the curre
 const manages = () => ['admin', 'lead'].includes(role());
 const settings = () => S.data.contests[curId()] || { id: null, name: 'No contest', type: 'cosplay', stageSeconds: 90, warnSeconds: 15, divisions: [], scoresLocked: false };
 const isMakers = () => settings().type === 'makers';
-const eventName = () => S.data.settings.event?.name || '';
+// Events: org → event → contests. Each contest belongs to one event (contest.eventId).
+const eventsList = () => Object.values(S.data.events || {}).filter(e => !e.deleted).sort((a, b) => (!!a.archived - !!b.archived) || (b.order ?? 0) - (a.order ?? 0) || String(a.name).localeCompare(b.name));
+const eventOf = c => (c && S.data.events?.[c.eventId] && !S.data.events[c.eventId].deleted) ? S.data.events[c.eventId] : null;
+const eventName = () => eventOf(S.data.contests[curId()])?.name || S.data.settings.event?.name || '';
+const newestEventId = () => eventsList().find(e => !e.archived)?.id || eventsList()[0]?.id || null;
 const inCur = r => r.contestId === curId();
 const criteria = () => Object.values(S.data.criteria).filter(c => !c.deleted && inCur(c)).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
 const participants = () => Object.values(S.data.participants).filter(p => !p.deleted && !p.hidden && inCur(p));
@@ -244,7 +264,7 @@ function nextFreeHeat(walkUp = false, exceptId) {
 }
 
 // ---------- persistence
-const saveNow = () => S.account ? kv('cj-u-' + S.account.username, 'state', { rev: S.rev, schema: S.schema, data: S.data, outbox: S.outbox }).catch(e => console.error(e)) : Promise.resolve();
+const saveNow = () => S.account ? kv('cj-u-' + accKey(S.account.org, S.account.username), 'state', { rev: S.rev, schema: S.schema, data: S.data, outbox: S.outbox }).catch(e => console.error(e)) : Promise.resolve();
 const persist = debounce(saveNow, 200);
 
 // ---------- local mutation + outbox
@@ -275,7 +295,7 @@ async function api(path, body, { method, token, timeout = 12000 } = {}) {
   try {
     const res = await fetch(serverBase() + path, {
       method: method || (body ? 'POST' : 'GET'),
-      headers: { ...(body ? { 'Content-Type': 'application/json' } : {}), ...(token ? { Authorization: 'Bearer ' + token } : {}) },
+      headers: orgHeaders({ ...(body ? { 'Content-Type': 'application/json' } : {}), ...(token ? { Authorization: 'Bearer ' + token } : {}) }),
       body: body ? JSON.stringify(body) : undefined, cache: 'no-store', signal: ctl.signal,
     });
     let data = {};
@@ -378,7 +398,8 @@ function connectEvents() {
   try { old?.close(); } catch { /* ignore */ }
   const base = serverBase() || location.origin;
   let sock;
-  try { sock = new WebSocket(base.replace(/^http/, 'ws') + '/api/ws'); } catch { return; }
+  wsOrg = orgCode();
+  try { sock = new WebSocket(base.replace(/^http/, 'ws') + '/api/ws' + (wsOrg ? '?org=' + encodeURIComponent(wsOrg) : '')); } catch { return; }
   ws = sock;
   sock.onopen = () => {
     wsRetry = 1000; monitorConn(true);
@@ -408,39 +429,45 @@ window.addEventListener('offline', () => setNet('offline'));
 async function getAccounts() { return (await kv(DEVICE_DB, 'accounts')) || {}; }
 async function saveAccount(acc) {
   const all = await getAccounts();
-  all[acc.username.toLowerCase()] = { ...(all[acc.username.toLowerCase()] || {}), ...acc };
+  const k = accKey(acc.org, acc.username);
+  all[k] = { ...(all[k] || {}), ...acc };
   await kv(DEVICE_DB, 'accounts', all);
 }
+let wsOrg = null;
 async function startSession(acc) {
   S.account = acc;
-  const saved = await kv('cj-u-' + acc.username.toLowerCase(), 'state').catch(() => null);
+  ui.orgOverride = null;
+  const saved = await kv('cj-u-' + accKey(acc.org, acc.username), 'state').catch(() => null);
   S.rev = saved?.rev || 0;
   S.schema = saved?.schema || 0;
   S.data = Object.assign(EMPTY(), saved?.data || {});
   S.outbox = (saved?.outbox || []).map(o => { delete o.sending; return o; });
   S.account.username = acc.username.toLowerCase();
-  await kv(DEVICE_DB, 'active', S.account.username);
+  const key = accKey(acc.org, S.account.username);
+  await kv(DEVICE_DB, 'active', key);
   // Each browser tab keeps its own sign-in, so two people can use two tabs/windows of one browser.
-  try { sessionStorage.setItem('cj-active', S.account.username); } catch {}
+  try { sessionStorage.setItem('cj-active', key); } catch {}
+  if ((acc.org || '') !== wsOrg) connectEvents(); // live updates come from this account's organization
   S.net = 'offline';
   if (location.hash === '#/login') location.hash = '#/';
   render();
   sync();
 }
 
-async function login(username, password) {
+async function login(username, password, org = orgCode()) {
   const uname = username.trim().toLowerCase();
+  org = CFG.local ? '' : String(org || '').trim().toLowerCase();
   try {
     const res = await api('/api/login', { username: uname, password });
     S.clockOffset = res.serverTime - Date.now();
-    const acc = { username: uname, user: res.user, token: res.token, server: serverBase() };
+    const acc = { username: uname, org, user: res.user, token: res.token, server: serverBase() };
     if (hasSubtle) { acc.salt = randHex(16); acc.verifier = await pbkdf2(password, acc.salt); }
     await saveAccount(acc);
     return startSession(acc);
   } catch (e) {
     if (e.status) throw e; // real answer from the server (wrong password etc.)
     // Network failure: try an offline sign-in with the verifier saved at the last online sign-in.
-    const acc = (await getAccounts())[uname];
+    const acc = (await getAccounts())[accKey(org, uname)];
     if (!acc || !acc.verifier) throw new Error('Can\'t reach the server, and this account hasn\'t signed in on this device before.');
     if (!hasSubtle) throw new Error('Offline sign-in needs the app to be opened over https.');
     if (await pbkdf2(password, acc.salt) !== acc.verifier) throw new Error('Wrong username or password');
@@ -456,7 +483,7 @@ async function logout() {
   if (acc.token) api('/api/logout', {}, { token: acc.token }).catch(() => {});
   await saveAccount({ ...acc, token: null });
   try { sessionStorage.removeItem('cj-active'); } catch {}
-  if ((await kv(DEVICE_DB, 'active').catch(() => null)) === acc.username) await kv(DEVICE_DB, 'active', null);
+  if ((await kv(DEVICE_DB, 'active').catch(() => null)) === accKey(acc.org, acc.username)) await kv(DEVICE_DB, 'active', null);
   S.account = null; S.data = EMPTY(); S.outbox = []; S.rev = 0;
   clearPhotoCache().catch(() => {}); // shared tablets: the next person re-downloads only what they may see
   location.hash = '#/login';
@@ -518,11 +545,12 @@ const ROUTES = {
   setup: { title: 'Contest setup', short: 'Setup', icon: 'setup', roles: ['admin', 'lead'], view: viewSetup },
   audit: { title: 'Audit log', short: 'Audit', icon: 'audit', roles: ['admin', 'lead'], view: viewAudit },
   admin: { title: 'Admin', short: 'Admin', icon: 'admin', global: true, view: viewAdmin },
+  platform: { title: 'Spotlight platform', short: 'Platform', icon: 'globe', global: true, platform: true, view: viewPlatform },
 };
 const TABS_MAX = 4; // bottom bar on phones: first 4 screens, the rest under "More"
-function routeAllowed(v) { return v.global ? isAdmin() : (!!curId() && v.roles.includes(role()) && !(v.cosplay && isMakers())); }
+function routeAllowed(v) { return v.platform ? !!S.account?.user.platform : v.global ? isAdmin() : (!!curId() && v.roles.includes(role()) && !(v.cosplay && isMakers())); }
 function home() {
-  if (!curId()) return isAdmin() ? 'admin' : 'none';
+  if (!curId()) return S.account?.user.platform && !Object.keys(S.data.contests).length ? 'platform' : isAdmin() ? 'admin' : 'none';
   const r = role();
   if ((r === 'tech' || r === 'emcee') && isMakers()) return 'none';
   return { admin: 'results', lead: 'results', viewer: 'results', coordinator: 'checkin', judge: 'judge', tech: 'tech', emcee: 'emcee' }[r] || 'none';
@@ -552,7 +580,23 @@ document.addEventListener('pointercancel', releasePointer, true);
 document.addEventListener('focusout', () => setTimeout(flushRender, 0));
 
 let monitorActive = false;
+// #/o/<code>/<rest>: an organization's link. Remembers the code on this device (or, for a monitor, shows that
+// org's monitor without signing in), then continues to <rest>.
+function takeOrgLink() {
+  const m = location.hash.match(/^#\/o\/([a-z0-9-]{1,30})(?:\/(.*))?$/i);
+  if (!m || CFG.local) return false;
+  const code = m[1].toLowerCase(), rest = m[2] || '';
+  if (rest.startsWith('monitor')) { ui.orgOverride = code; location.replace('#/' + rest); return true; }
+  localStorage.setItem('cj-org', code);
+  if (S.account && (S.account.org || '') !== code) { switchPerson(); return true; }
+  location.replace('#/' + (rest || (S.account ? '' : 'login')));
+  if (!S.account) connectEvents();
+  return true;
+}
+
 function render() {
+  if (takeOrgLink()) return;
+  if (ui.orgOverride != null && route().name !== 'monitor') { ui.orgOverride = null; connectEvents(); }
   const app = $('#app');
   const r = route();
   if (r.name === 'monitor') { if (!monitorActive || (r.args[0] || null) !== mon.cid) renderMonitor(app); return; }
@@ -599,7 +643,11 @@ function render() {
     $('#brand-kicker').classList.toggle('hidden', !eventName());
     $('#ev-name').textContent = eventName() || APP_NAME;
     const typeTag = c => c.type === 'makers' ? ' (Makers)' : '';
-    $('#cpick').replaceChildren(...openable.map(c => h('option', { value: c.id, selected: c.id === curId() }, c.name + typeTag(c))),
+    const opt = c => h('option', { value: c.id, selected: c.id === curId() }, c.name + typeTag(c));
+    const evIds = [...new Set(openable.map(c => c.eventId || ''))];
+    $('#cpick').replaceChildren(...(evIds.length > 1
+      ? evIds.map(eid => h('optgroup', { label: S.data.events?.[eid]?.name || 'Unnamed event' }, openable.filter(c => (c.eventId || '') === eid).map(opt)))
+      : openable.map(opt)),
       ...(isAdmin() ? [h('option', { value: '__new__' }, '＋ New contest…')] : []));
     fitSelect($('#cpick'));
   } else {
@@ -609,19 +657,20 @@ function render() {
   }
   $('#who').textContent = S.account.user.displayName;
   const monitorLink = !!curId() && !isMakers() && !['judge', 'viewer', 'emcee'].includes(role());
-  const monHref = '#/monitor/' + curId();
+  const monHref = monitorHref(curId());
   // Desktop nav: short names; Admin and Monitor as compact icons (with tooltips) so everything fits beside the picker.
-  const contestTabs = allowed.filter(([k]) => k !== 'admin');
+  const contestTabs = allowed.filter(([k]) => k !== 'admin' && k !== 'platform');
   $('#nav').replaceChildren(...contestTabs.map(([k, v]) => h('a', { href: '#/' + k, class: k === r.name ? 'active' : '', title: v.title }, v.short)),
     ...(monitorLink ? [h('a.nav-icon', { href: monHref, target: '_blank', title: 'Open the confidence monitor in a new window', 'aria-label': 'Monitor' }, icon('monitor'))] : []),
-    ...(isAdmin() ? [h('a.nav-icon', { href: '#/admin', class: r.name === 'admin' ? 'active' : '', title: 'Admin: contests, accounts, GitHub copy', 'aria-label': 'Admin' }, icon('admin'))] : []));
+    ...(isAdmin() ? [h('a.nav-icon', { href: '#/admin', class: r.name === 'admin' ? 'active' : '', title: 'Admin: contests, accounts, GitHub copy', 'aria-label': 'Admin' }, icon('admin'))] : []),
+    ...(S.account.user.platform ? [h('a.nav-icon', { href: '#/platform', class: r.name === 'platform' ? 'active' : '', title: 'Spotlight platform: organizations', 'aria-label': 'Platform' }, icon('globe'))] : []));
   // Phones / portrait tablets: bottom tabs. One-screen roles (judges) get none.
-  const entries = [...allowed.map(([k, v]) => ({ k, ...v })), ...(monitorLink ? [{ k: 'monitor/' + curId(), short: 'Monitor', title: 'Monitor', icon: 'monitor', ext: true }] : [])];
+  const entries = [...allowed.map(([k, v]) => ({ k, ...v })), ...(monitorLink ? [{ k: 'monitor/' + curId(), href: monHref, short: 'Monitor', title: 'Monitor', icon: 'monitor', ext: true }] : [])];
   const tabs = entries.length > TABS_MAX + 1 ? entries.slice(0, TABS_MAX) : entries;
   const extra = entries.slice(tabs.length);
   document.body.classList.toggle('has-tabs', entries.length > 1);
   $('#tabbar').replaceChildren(
-    ...tabs.map(e => h('a', { href: '#/' + e.k, class: e.k === r.name ? 'active' : '', target: e.ext ? '_blank' : null }, icon(e.icon), e.short)),
+    ...tabs.map(e => h('a', { href: e.href || '#/' + e.k, class: e.k === r.name ? 'active' : '', target: e.ext ? '_blank' : null }, icon(e.icon), e.short)),
     ...(extra.length ? [h('button', { class: extra.some(e => e.k === r.name) ? 'active' : '', onclick: () => moreSheet(extra, r.name) }, icon('more'), 'More')] : []));
   renderSync();
   document.title = cur.title + ' · ' + (curId() ? settings().name : APP_NAME);
@@ -728,6 +777,9 @@ function accountMenu() {
 // ============================================================ login view
 async function renderLogin(app) {
   const accounts = await getAccounts();
+  const org = h('input', { type: 'text', autocomplete: 'organization', autocapitalize: 'none', spellcheck: false, placeholder: 'Code from your organizer (leave blank if none)', value: localStorage.getItem('cj-org') || '',
+    'aria-label': 'Organization code', oninput: e => { e.target.value = e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ''); } });
+  const orgField = CFG.local ? null : h('label.field.org-field', h('span', 'Organization'), org);
   const user = h('input', { type: 'text', autocomplete: 'username', autocapitalize: 'none', placeholder: 'Username' });
   const pw = h('input', { type: 'password', autocomplete: 'current-password', placeholder: 'Password' });
   const err = h('div.small', { style: { color: 'var(--bad)', minHeight: '1.2em' } });
@@ -743,13 +795,16 @@ async function renderLogin(app) {
     h('form.panel.stack', {
       onsubmit: async e => {
         e.preventDefault(); err.textContent = ''; btn.disabled = true; btn.textContent = 'Signing in…';
-        try { await login(user.value, pw.value); } catch (x) { err.textContent = x.message; btn.disabled = false; btn.textContent = 'Sign in'; }
+        const code = CFG.local ? '' : org.value.trim().toLowerCase();
+        if (!CFG.local) { localStorage.setItem('cj-org', code); if (code !== wsOrg) connectEvents(); }
+        try { await login(user.value, pw.value, code); } catch (x) { err.textContent = x.message; btn.disabled = false; btn.textContent = 'Sign in'; }
       },
     },
     recent.length ? h('div', h('div.small.muted', { style: { marginBottom: '.4rem' } }, 'Used on this device'),
-      h('div.recent', recent.map(a => h('button.chip', { type: 'button', onclick: () => { user.value = a.username; pw.focus(); } }, a.user?.displayName || a.username)))) : null,
-    user, pw, err, btn, serverInfo),
-    h('p.small.muted', { style: { textAlign: 'center', marginTop: '1.5rem' } }, h('a', { href: '#/monitor' }, 'Open a confidence monitor (no sign-in needed)'))));
+      h('div.recent', recent.map(a => h('button.chip', { type: 'button', title: a.org ? `${a.username} · ${a.org}` : a.username,
+        onclick: () => { user.value = a.username; org.value = a.org || ''; pw.focus(); } }, a.user?.displayName || a.username, a.org && !CFG.local ? h('span.org-tag', a.org) : null)))) : null,
+    orgField, user, pw, err, btn, serverInfo),
+    h('p.small.muted', { style: { textAlign: 'center', marginTop: '1.5rem' } }, h('a', { href: monitorHref('') }, 'Open a confidence monitor (no sign-in needed)'))));
   setTimeout(() => { const a = document.activeElement; if (!a || a === document.body) user.focus(); }, 50); // never steal focus from a field already in use
 }
 
@@ -995,7 +1050,7 @@ function viewStage() {
       h('div.panel.stack',
         h('div.row.between', h('div', h('span.kicker', 'On stage'), h('h2', { style: { margin: 0 } }, cur ? partLabel(cur) : '—'),
           cur ? h('div.muted', [cur.character, cur.series, cur.division].filter(Boolean).join(' · ')) : null),
-        h('a.btn', { href: '#/monitor/' + curId(), target: '_blank' }, 'Open monitor ↗')),
+        h('a.btn', { href: monitorHref(curId()), target: '_blank' }, 'Open monitor ↗')),
         cur?.notes ? h('div.banner.warn', h('span.tag', 'Staff note'), h('span.grow', cur.notes)) : null,
         clock, prog, stateLbl,
         h('div.controls',
@@ -1055,7 +1110,7 @@ function renderMonitor(app) {
     if (!known.length) api('/api/stage').then(d => monitorFeed(d, 'server')).catch(() => {});
     app.replaceChildren(h('div.login', h('div.logo', h('img', { src: 'icons/icon.svg', alt: '' }), h('h1', 'Monitor'), h('span.kicker', 'Choose a contest')),
       h('div.panel.stack', known.length
-        ? h('div.sheet-list', known.map(d => h('a', { href: '#/monitor/' + d.contestId }, icon('monitor'), d.contestName || 'Contest')))
+        ? h('div.sheet-list', known.map(d => h('a', { href: monitorHref(d.contestId) }, icon('monitor'), d.contestName || 'Contest')))
         : h('p.muted', 'Waiting for the server…'))));
     return;
   }
@@ -1167,7 +1222,7 @@ async function photoUrl(id) {
   let blob = await kv('cj-photos', id).catch(() => null);
   if (!blob) {
     if (!S.account?.token) throw new Error('offline');
-    const res = await fetch(serverBase() + '/api/photos/' + encodeURIComponent(id), { headers: { Authorization: 'Bearer ' + S.account.token } });
+    const res = await fetch(serverBase() + '/api/photos/' + encodeURIComponent(id), { headers: authHeaders() });
     if (!res.ok) throw new Error('missing');
     blob = await res.blob();
     kv('cj-photos', id, blob).catch(() => {});
@@ -1236,7 +1291,7 @@ async function shrinkImage(file, max = 1600) {
 async function uploadPhoto(pid, file) {
   const blob = await shrinkImage(file);
   const res = await fetch(serverBase() + '/api/photos?participant=' + encodeURIComponent(pid), {
-    method: 'POST', headers: { 'Content-Type': blob.type || 'image/jpeg', Authorization: 'Bearer ' + S.account.token }, body: blob,
+    method: 'POST', headers: authHeaders({ 'Content-Type': blob.type || 'image/jpeg' }), body: blob,
   });
   const d = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(d.error || 'Upload failed');
@@ -1737,6 +1792,9 @@ function describeAudit(a) {
     case 'participant.checkin': return h('span', h('b', a.username), ` checked in ${a.label}`);
     case 'participant.checkout': return h('span', h('b', a.username), ` undid check-in for ${a.label}`);
     case 'participant.delete': return h('span', h('b', a.username), ` deleted ${a.label}`);
+    case 'event.create': return h('span', h('b', a.username), ` created the event ${a.label}`);
+    case 'event.update': return h('span', h('b', a.username), ` changed the event ${a.label}`);
+    case 'data.import': return h('span', h('b', a.username), ` ${a.label}`);
     case 'participant.finalist': return h('span', h('b', a.username), ` sent ${a.label} to the finals`);
     case 'participant.unfinalist': return h('span', h('b', a.username), ` removed ${a.label} from the finals`);
     case 'settings.update': return h('span', h('b', a.username), ' changed the event name: ', kv2(a.after));
@@ -2024,6 +2082,7 @@ function githubPanel(online) {
   const draw = st => {
     const pending = st.lastPushRev == null || st.lastPushRev !== st.rev;
     if (st.local && !st.configured) return body.replaceChildren(localServerPanel(st));
+    if (st.managed) { title.textContent = 'Data storage'; return body.replaceChildren(h('p.small.muted', 'Your organization\'s data is stored and kept safe by Spotlight. Use Backup below for a copy of your own, or Transfer contests to move contests to a local server.')); }
     body.replaceChildren(...[
       st.local ? localServerPanel(st) : null,
       h('p.small.muted', 'The live data is kept by the server and copied to the private GitHub repo ', h('b', `${st.repo}/${st.path}`), ` within about ${st.flushSeconds} seconds of any change.`),
@@ -2045,17 +2104,79 @@ function githubPanel(online) {
   };
   if (online) call('GET').then(draw).catch(e => body.replaceChildren(h('p.small', { style: { color: 'var(--bad)' } }, e.message)));
   else if (CFG.local) body.replaceChildren(localServerPanel(null));
-  return CFG.local ? body : h('div.panel.stack', h('h3', 'GitHub data copy'), body);
+  const title = h('h3', 'GitHub data copy');
+  return CFG.local ? body : h('div.panel.stack', title, body);
+}
+
+// ============================================================ platform (Spotlight super-admin)
+const orgLink = o => `${location.origin}${location.pathname}#/o/${o.code}`;
+const slugCode = t => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 30);
+function viewPlatform() {
+  const call = (path, body, method) => api('/api/platform' + path, body, { method, token: S.account.token, timeout: 30000 });
+  const box = h('div.stack', h('div.panel.muted', S.net === 'online' ? 'Loading organizations…' : 'Connect to the internet to manage organizations.'));
+  const d = ui.newOrg ||= { name: '', code: '', codeEdited: false, admin: 'admin', event: '' };
+  const handover = (title, o, username, temp) => {
+    const text = `Spotlight sign-in for ${o.name}\nLink: ${orgLink(o)}\nOrganization code: ${o.code}\nUsername: ${username}\nTemporary password: ${temp}\n(You'll choose your own password when you sign in.)`;
+    openModal(title, h('div.stack',
+      h('p.small.muted', 'Send these to the organization\'s admin. The temporary password is shown only now.'),
+      h('pre.handover', text)), [h('button.btn', { onclick: () => navigator.clipboard?.writeText(text).then(() => toast('Copied', 'ok'), () => {}) }, 'Copy')]);
+  };
+  const act = async (fn, msg) => { try { const r = await fn(); if (msg) toast(msg, 'ok'); load(); return r; } catch (e) { toast(e.message, 'bad'); } };
+  const draw = orgs => {
+    const name = h('input', { type: 'text', placeholder: 'Organization name, e.g. Acme Con', value: d.name, oninput: e => { d.name = e.target.value; if (!d.codeEdited) { d.code = slugCode(d.name); code.value = d.code; } } });
+    const code = h('input', { type: 'text', placeholder: 'code', value: d.code, oninput: e => { e.target.value = slugCode(e.target.value); d.code = e.target.value; d.codeEdited = true; } });
+    const admin = h('input', { type: 'text', placeholder: 'admin', value: d.admin, oninput: e => { d.admin = e.target.value.trim().toLowerCase(); } });
+    const event = h('input', { type: 'text', placeholder: 'First event name (optional), e.g. Acme Con 2027', value: d.event, oninput: e => { d.event = e.target.value; } });
+    const create = async () => {
+      if (!d.name.trim() || !d.code) return toast('Give it a name and a code', 'bad');
+      let r;
+      try { r = await call('/orgs', { name: d.name.trim(), code: d.code, adminUsername: d.admin || 'admin', eventName: d.event.trim() }); } catch (e) { return toast(e.message, 'bad'); }
+      ui.newOrg = null; load();
+      handover(`${r.org.name} is ready`, r.org, r.admin.username, r.admin.tempPassword);
+    };
+    box.replaceChildren(
+      h('div.panel.stack', h('h3', 'Organizations'),
+        h('div.table-wrap', h('table',
+          h('thead', h('tr', h('th', 'Organization'), h('th', 'Code / sign-in link'), h('th.r', 'Events'), h('th.r', 'Contests'), h('th.r', 'Entries'), h('th.r', 'Accounts'), h('th', ''))),
+          h('tbody', orgs.map(o => h('tr', { style: { opacity: o.suspended ? .55 : 1 } },
+            h('td', h('b', o.name), o.default ? h('span.badge', { style: { marginLeft: '8px' } }, 'yours') : null, o.suspended ? h('span.badge.no_show', { style: { marginLeft: '8px' } }, 'suspended') : null,
+              h('div.small.muted', 'since ' + new Date(o.createdAt).toLocaleDateString())),
+            h('td', h('code', o.code), ' ', h('button.btn.sm.ghost', { title: orgLink(o), onclick: () => navigator.clipboard?.writeText(orgLink(o)).then(() => toast('Link copied', 'ok'), () => {}) }, 'Copy link')),
+            ...['events', 'contests', 'entries', 'accounts'].map(k => h('td.r', o.stats ? o.stats[k] : '—')),
+            h('td', h('div.row', { style: { justifyContent: 'flex-end', flexWrap: 'nowrap' } },
+              h('button.btn.sm.ghost', { onclick: () => { const v = prompt('Organization name:', o.name); if (v && v.trim() !== o.name) act(() => call('/orgs/' + o.id, { name: v.trim() }, 'PATCH'), 'Renamed'); } }, 'Rename'),
+              h('button.btn.sm.ghost', { onclick: () => {
+                const v = prompt(`New sign-in code for ${o.name}. Devices using the old code "${o.code}" will need the new one.`, o.code);
+                if (v != null && slugCode(v) && slugCode(v) !== o.code) act(() => call('/orgs/' + o.id, { code: slugCode(v) }, 'PATCH'), 'Code changed');
+              } }, 'Code'),
+              h('button.btn.sm.ghost', { onclick: async () => {
+                const u = prompt(`Give an account in ${o.name} a new temporary password. Username:`, 'admin');
+                if (!u) return;
+                const r = await act(() => call('/orgs/' + o.id + '/reset', { username: u.trim().toLowerCase() }, 'POST'));
+                if (r?.tempPassword) handover('New temporary password', o, r.username, r.tempPassword);
+              } }, 'Reset password'),
+              o.default ? null : h('button.btn.sm', { class: o.suspended ? '' : 'danger', onclick: () => {
+                if (!o.suspended && !confirm(`Suspend ${o.name}? Nobody in it can sign in or sync until you reactivate it. Nothing is deleted.`)) return;
+                act(() => call('/orgs/' + o.id, { suspended: !o.suspended }, 'PATCH'), o.suspended ? 'Reactivated' : 'Suspended');
+              } }, o.suspended ? 'Reactivate' : 'Suspend'))))))))),
+      h('div.panel.stack', h('h3', 'New organization'),
+        h('p.small.muted', 'Each organization gets its own separate database, admin and events. Staff sign in with its code, or use its link.'),
+        h('div.form-grid', h('label.field', h('span', 'Name'), name), h('label.field', h('span', 'Sign-in code'), code),
+          h('label.field', h('span', 'First admin username'), admin), h('label.field', h('span', 'First event'), event)),
+        h('div', h('button.btn.primary', { onclick: create }, icon('plus'), 'Create organization'))));
+  };
+  const load = () => call('/orgs').then(r => draw(r.orgs)).catch(e => box.replaceChildren(h('div.banner.bad', h('span.tag', 'Error'), h('span.grow', e.message))));
+  if (S.net === 'online' || S.net === 'syncing') load();
+  return h('div.stack',
+    h('div.panel', h('span.kicker', 'Spotlight platform'), h('p.small.muted', { style: { margin: '.3rem 0 0' } }, 'Only you see this. Organizations are your customers: each has its own data, admin, events and contests.')),
+    box);
 }
 
 // ============================================================ admin (account-wide)
 function viewAdmin() {
   const online = S.net === 'online';
-  const evName = h('input', { type: 'text', placeholder: 'e.g. Winter Con 2026', value: ui.eventNameDraft ?? eventName(), oninput: e => { ui.eventNameDraft = e.target.value; } });
   return h('div.stack',
-    h('div.panel.stack', h('h3', 'Event'),
-      h('p.small.muted', 'Shown above the contest name in the title bar and on the monitors. Optional.'),
-      h('div.row', h('div.grow', evName), h('button.btn.primary', { onclick: () => { ui.eventNameDraft = undefined; mutate('settings', 'event', { name: evName.value.trim() }); toast('Event name saved', 'ok'); } }, 'Save'))),
+    eventsPanel(),
     contestsPanel(),
     h('div.panel.stack', h('div.row.between', h('h3', 'Accounts'), online ? null : h('span.badge.draft', 'Needs connection')),
       h('p.small.muted', 'Each account gets a role per contest, or is an admin who sees and manages everything. New accounts and password resets must choose their own password at first sign-in.'),
@@ -2068,7 +2189,7 @@ function viewAdmin() {
         disabled: !online,
         onclick: async () => {
           try {
-            const res = await fetch(serverBase() + '/api/backup', { headers: { Authorization: 'Bearer ' + S.account.token } });
+            const res = await fetch(serverBase() + '/api/backup', { headers: authHeaders() });
             if (!res.ok) throw new Error();
             download(`spotlight-backup-${new Date().toISOString().slice(0, 10)}.json`, await res.text(), 'application/json');
           } catch { toast('Backup needs a connection to the server', 'bad'); }
@@ -2097,7 +2218,7 @@ function transferPanel(online) {
         let n = 0;
         for (const id of f.photoIds) {
           status.textContent = `Adding photos… ${++n} of ${f.photoIds.length}`;
-          const r = await fetch(serverBase() + '/api/photos/' + encodeURIComponent(id), { headers: { Authorization: 'Bearer ' + S.account.token } });
+          const r = await fetch(serverBase() + '/api/photos/' + encodeURIComponent(id), { headers: authHeaders() });
           if (r.ok) { const b = await r.blob(); f.photos[id] = { type: b.type || 'image/jpeg', b64: await blobToB64(b) }; }
         }
       }
@@ -2167,7 +2288,7 @@ async function loadTransferFile(fileObj) {
       let n = 0, failed = 0;
       for (const id of need) {
         progress.textContent = `Copying photos… ${++n} of ${need.length}`;
-        const res = await fetch(serverBase() + '/api/transfer/photo?id=' + encodeURIComponent(id), { method: 'PUT', headers: { Authorization: 'Bearer ' + S.account.token, 'Content-Type': photos[id].type }, body: b64ToBytes(photos[id].b64) }).catch(() => null);
+        const res = await fetch(serverBase() + '/api/transfer/photo?id=' + encodeURIComponent(id), { method: 'PUT', headers: authHeaders({ 'Content-Type': photos[id].type }), body: b64ToBytes(photos[id].b64) }).catch(() => null);
         if (!res?.ok) failed++;
       }
       clearPhotoCache?.();
@@ -2178,9 +2299,39 @@ async function loadTransferFile(fileObj) {
   };
 }
 
+function eventsPanel() {
+  const evs = eventsList();
+  const d = ui.newEvent ||= { name: '' };
+  const name = h('input', { type: 'text', placeholder: 'e.g. Halo Fest 2027', value: d.name, oninput: e => { d.name = e.target.value; } });
+  const n = e => Object.values(S.data.contests).filter(c => c.eventId === e.id && !c.deleted).length;
+  return h('div.panel.stack', h('h3', 'Events'),
+    h('p.small.muted', 'Each event holds its own contests. The event name shows in the title bar and on the confidence monitors.'),
+    evs.length ? h('div.list', evs.map(e => h('div.item.event-row', { style: { cursor: 'default', opacity: e.archived ? .55 : 1 } },
+      h('div.who', h('input.event-name', { type: 'text', value: e.name, placeholder: 'Name this event, e.g. Halo Fest 2026', 'aria-label': 'Event name',
+        onchange: ev => { const v = ev.target.value.trim(); if (v !== e.name) { mutate('events', e.id, { name: v }); toast(v ? 'Event renamed' : 'Event name cleared', 'ok'); } } }),
+        h('div.c', `${n(e)} contest${n(e) === 1 ? '' : 's'}`, e.archived ? ' · archived' : '')),
+      h('button.btn.sm.ghost', { onclick: () => {
+        if (!e.archived && !confirm(`Archive "${e.name || 'this event'}"? Its contests disappear for everyone except admins. Nothing is deleted, and you can restore it any time.`)) return;
+        mutate('events', e.id, { archived: !e.archived });
+      } }, e.archived ? 'Restore' : 'Archive'),
+      !n(e) && evs.length > 1 ? h('button.btn.sm.ghost', { onclick: () => { if (confirm(`Delete the empty event "${e.name || 'unnamed'}"?`)) mutate('events', e.id, { deleted: true }); } }, 'Delete') : null)))
+      : h('p.muted', 'No events yet.'),
+    h('div.row', h('div.grow', name), h('button.btn.primary', { onclick: () => {
+      const nm = name.value.trim();
+      if (!nm) return toast('Give the event a name', 'bad');
+      const id = newId();
+      mutate('events', id, { name: nm, order: Math.max(0, ...evs.map(e => e.order || 0)) + 1 });
+      ui.newEvent = { name: '' }; ui.newContest = { ...(ui.newContest || { name: '', type: 'cosplay' }), eventId: id };
+      toast(`Created ${nm}. Add its contests below.`, 'ok');
+    } }, icon('plus'), 'New event')));
+}
+
 function contestsPanel() {
-  const all = Object.values(S.data.contests).filter(c => !c.deleted).sort((a, b) => (!!a.archived - !!b.archived) || (a.order ?? 0) - (b.order ?? 0));
+  const evs = eventsList();
+  const all = Object.values(S.data.contests).filter(c => !c.deleted).sort((a, b) => (evs.indexOf(eventOf(a)) - evs.indexOf(eventOf(b))) || (!!a.archived - !!b.archived) || (a.order ?? 0) - (b.order ?? 0));
   const d = ui.newContest ||= { name: '', type: 'cosplay' };
+  if (!d.eventId || !S.data.events?.[d.eventId] || S.data.events[d.eventId].deleted) d.eventId = newestEventId();
+  const evPick = h('select', { onchange: e => { d.eventId = e.target.value; } }, evs.map(e => h('option', { value: e.id, selected: d.eventId === e.id }, (e.name || 'Unnamed event') + (e.archived ? ' (archived)' : ''))));
   const name = h('input', { type: 'text', placeholder: 'Contest name, e.g. Saturday Masquerade', value: d.name, oninput: e => { d.name = e.target.value; } });
   const type = h('select', { onchange: e => { d.type = e.target.value; } }, Object.entries(TYPE_INFO).map(([k, v]) => h('option', { value: k, selected: d.type === k }, `${v.label} — ${v.hint}`)));
   const count = (coll, c, f = () => true) => Object.values(S.data[coll]).filter(x => x.contestId === c.id && !x.deleted && f(x)).length;
@@ -2188,31 +2339,35 @@ function contestsPanel() {
   return h('div.panel.stack', h('h3', 'Contests'),
     all.length ? h('div.table-wrap', h('table',
       h('thead', h('tr', h('th', 'Contest'), h('th', 'Type'), h('th.r', 'Entries'), h('th.r', 'Judges'), h('th.r', 'Leads'), h('th', ''))),
-      h('tbody', all.map(c => h('tr', { style: { opacity: c.archived ? .55 : 1 } },
+      h('tbody', all.flatMap((c, i) => [
+        evs.length > 1 && (i === 0 || eventOf(all[i - 1]) !== eventOf(c)) ? h('tr.event-head', h('td', { colspan: 6 }, eventOf(c)?.name || 'Unnamed event')) : null,
+        h('tr', { style: { opacity: c.archived ? .55 : 1 } },
         h('td', h('b', c.name), c.archived ? h('span.badge', { style: { marginLeft: '8px' } }, 'archived') : null, c.id === curId() ? h('span.badge.checked_in', { style: { marginLeft: '8px' } }, 'open now') : null),
         h('td', TYPE_INFO[c.type]?.label || c.type),
         h('td.r', count('participants', c)),
         h('td.r', people(c, 'judge')),
         h('td.r', people(c, 'lead')),
         h('td', h('div.row', { style: { justifyContent: 'flex-end', flexWrap: 'nowrap' } },
+          evs.length > 1 ? h('select.move-event', { title: 'Move to another event', onchange: e => { mutate('contests', c.id, { eventId: e.target.value }); toast(`Moved ${c.name}`, 'ok'); } },
+            evs.map(e => h('option', { value: e.id, selected: c.eventId === e.id }, e.name || 'Unnamed event'))) : null,
           c.archived ? null : h('button.btn.sm', { onclick: () => setContest(c.id) }, 'Open'),
           h('button.btn.sm.ghost', {
             onclick: () => {
               if (!c.archived && !confirm(`Archive "${c.name}"? It disappears for everyone except admins. Its data is kept and you can restore it any time.`)) return;
               mutate('contests', c.id, { archived: !c.archived });
             },
-          }, c.archived ? 'Restore' : 'Archive'))))))))
+          }, c.archived ? 'Restore' : 'Archive'))))]).filter(Boolean))))
       : h('p.muted', 'No contests yet. Create the first one below.'),
     h('h3', 'New contest'),
-    h('div.form-grid', name, type),
+    h('div.form-grid', name, type, evs.length > 1 ? h('label.field', h('span', 'Event'), evPick) : null),
     h('div', h('button.btn.primary', {
       onclick: () => {
         const nm = name.value.trim();
         if (!nm) { toast('Give the contest a name', 'bad'); return; }
         const id = newId();
         // Defaults mirror the server's, so the contest is usable right away (the server adds the criteria).
-        mutate('contests', id, { name: nm, type: d.type, stageSeconds: 90, warnSeconds: 15, divisions: DEFAULT_DIVISIONS[d.type], scoresLocked: false, order: all.length + 1 });
-        ui.newContest = { name: '', type: 'cosplay' };
+        mutate('contests', id, { name: nm, type: d.type, eventId: d.eventId || undefined, stageSeconds: 90, warnSeconds: 15, divisions: DEFAULT_DIVISIONS[d.type], scoresLocked: false, order: all.length + 1 });
+        ui.newContest = { name: '', type: 'cosplay', eventId: d.eventId };
         toast(`Created ${nm}. Default criteria arrive with the next sync; give people access in its Contest setup.`, 'ok');
         setContest(id);
       },
