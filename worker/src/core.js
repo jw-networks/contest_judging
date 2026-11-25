@@ -18,9 +18,11 @@ const SHOW_FIELDS = ['music', 'lighting', 'intro', 'pronunciation']; // stage de
 const MAX_PHOTOS = 8, MAX_PHOTO_BYTES = 1_200_000; // Cloudflare storage values max out at 2 MB
 export const CONTEST_TYPES = ['cosplay', 'makers'];
 export const COLLS = ['settings', 'events', 'contests', 'criteria', 'participants', 'scores', 'stage'];
-const STATUSES = ['pending', 'registered', 'checked_in', 'on_stage', 'done', 'no_show', 'withdrawn', 'declined'];
+const STATUSES = ['pending', 'waitlisted', 'registered', 'checked_in', 'on_stage', 'done', 'no_show', 'withdrawn', 'declined'];
 // Entries that don't take a place (heat counts, numbering of who's in): left, or turned away.
 export const OUT_STATUSES = ['no_show', 'withdrawn', 'declined'];
+// Statuses that don't hold a place (in the contest, or in a heat). Waitlisted people are waiting for one.
+const NO_PLACE = [...OUT_STATUSES, 'waitlisted'];
 // ---------- public sign-ups (contest.signup)
 // Built-in fields per contest type: [id, label, participant property, default state]. Custom fields are added by
 // the lead (id q_…) and stored in participant.answers. States: required | optional | hidden.
@@ -406,7 +408,7 @@ export class Contest {
   signupState(c) {
     const sg = c.signup || {};
     const ev = this.db.data.events?.[c.eventId];
-    const taken = Object.values(this.db.data.participants).filter(p => p.contestId === c.id && !p.deleted && !OUT_STATUSES.includes(p.status)).length;
+    const taken = Object.values(this.db.data.participants).filter(p => p.contestId === c.id && !p.deleted && !NO_PLACE.includes(p.status)).length;
     let reason = '';
     if (!sg.enabled || c.archived || (ev && ev.archived)) reason = 'Sign-ups for this contest are closed.';
     else if (sg.closesAt && Date.now() > sg.closesAt) reason = 'Sign-ups for this contest have closed.';
@@ -415,15 +417,22 @@ export class Contest {
     return { open: !reason, reason };
   }
   // Heat for a new pre-registered entry: the heat with a free regular place and the fewest people (null if none).
-  placeHeat(c) {
+  placeHeat(c, exceptId) {
     const n = c.heats || 0, size = c.heatSize ?? 14, walk = c.walkUps ?? 4;
     let best = null, bestN = Infinity;
     for (let h = 1; h <= n; h++) {
-      const ps = Object.values(this.db.data.participants).filter(p => p.contestId === c.id && p.heat === h && !p.deleted && !OUT_STATUSES.includes(p.status));
+      const ps = Object.values(this.db.data.participants).filter(p => p.contestId === c.id && p.heat === h && !p.deleted && !NO_PLACE.includes(p.status) && p.id !== exceptId);
       const reg = ps.filter(p => !p.walkUp).length;
       if (reg < size && ps.length < size + walk && ps.length < bestN) { best = h; bestN = ps.length; }
     }
     return best;
+  }
+  /** 1 = next off the waitlist. Waitlisted entries are in the order they were waitlisted. */
+  waitlistPos(p) {
+    const w = Object.values(this.db.data.participants).filter(x => x.contestId === p.contestId && !x.deleted && x.status === 'waitlisted')
+      .sort((a, b) => (a.waitlistedAt || 0) - (b.waitlistedAt || 0) || String(a.number).localeCompare(String(b.number), undefined, { numeric: true }));
+    const i = w.findIndex(x => x.id === p.id);
+    return i < 0 ? null : i + 1;
   }
   async signupEntry(c, url, body) {
     const entry = String(body?.entry || url.searchParams.get('entry') || ''), token = String(body?.token || url.searchParams.get('token') || '');
@@ -526,7 +535,7 @@ export class Contest {
     if (action === 'entry' && req.method === 'GET') {
       const p = await this.signupEntry(c, url);
       return json(200, { contest: c.name, eventName: ev?.name || '', number: p.number, name: p.name || '', character: p.character || '', title: p.title || '',
-        status: p.status, heat: (c.heats || 0) > 0 ? p.heat || null : null, photos: (p.photos || []).length, signupAt: p.signupAt,
+        status: p.status, heat: (c.heats || 0) > 0 && p.status !== 'waitlisted' ? p.heat || null : null, waitlistPos: p.status === 'waitlisted' ? this.waitlistPos(p) : null, photos: (p.photos || []).length, signupAt: p.signupAt,
         ...(c.feedback?.released ? { feedback: this.feedbackFor(p, { comments: c.feedback.comments !== false }), heats: (c.heats || 0) > 0 } : {}) });
     }
     if (action === 'withdraw' && req.method === 'POST') {
@@ -594,7 +603,13 @@ export class Contest {
       if (!p || !c || !p.email) continue;
       const { contest, event } = this.contestBits(c);
       const who = p.title || p.character || p.name || '';
-      if (kind === 'approved') {
+      if (kind === 'waitlisted') {
+        const pos = this.waitlistPos(p);
+        await this.mail(p.email, `You're on the waitlist: ${contest}`, message({ kicker: event || contest, title: 'You\'re on the waitlist', big: pos ? `#${pos} in line` : '',
+          lines: [`Thanks for signing up${who ? ` with ${who}` : ''} for ${contest}${event ? ` at ${event}` : ''}. The contest is full right now, so you're on the waitlist${pos ? `, number ${pos} in line` : ''}.`,
+            'If a place opens up, the organizers will move you in and we\'ll email you straight away.'],
+          after: ['You can check your place in line, or take yourself off the waitlist, with the private link from your first email.'] }), 'Waitlist email');
+      } else if (kind === 'approved') {
         await this.mail(p.email, `You're in: ${contest}`, message({ kicker: event || contest, title: `You're in, ${p.name || 'and welcome'}!`, big: p.number ? '#' + p.number : '',
           lines: [`Your sign-up${who ? ` for ${who}` : ''} has been approved for ${contest}${event ? ` at ${event}` : ''}.`, p.heat ? `You're in heat ${p.heat}.` : '', 'Please check in when you arrive.'].filter(Boolean),
           after: ['Need to drop out? Use the private link from your first email, or contact the organizers.'] }), 'Approval email');
@@ -924,6 +939,15 @@ ${r.comments.length ? `<p style="margin:0 0 6px;font-size:13px;font-weight:700;l
         patch.createdAt = Date.now();
         if (patch.status === undefined) patch.status = patch.checkedIn ? 'checked_in' : 'registered';
       }
+      // Waitlist: remember when (that's their place in the queue). They aren't here or in a place yet.
+      if (patch.status === 'waitlisted' && existing?.status !== 'waitlisted') Object.assign(patch, { waitlistedAt: Date.now(), checkedIn: false });
+      // Off the waitlist and into the contest: with heats, put them in a heat that has a free place.
+      const c = this.db.data.contests[cid];
+      if (existing?.status === 'waitlisted' && patch.status && !NO_PLACE.includes(patch.status) && patch.heat === undefined && (c?.heats || 0) > 0) {
+        const size = c.heatSize ?? 14, walk = c.walkUps ?? 4;
+        const room = h => { const ps = Object.values(store).filter(p => p.contestId === cid && p.heat === h && !p.deleted && !NO_PLACE.includes(p.status) && p.id !== id); return ps.filter(p => !p.walkUp).length < size && ps.length < size + walk; };
+        if (!(existing.heat && !existing.walkUp && room(existing.heat))) patch.heat = this.placeHeat(c, id);
+      }
     }
     if (!existing && coll === 'criteria' && !patch.name) return { ok: false, reason: 'criterion needs a name' };
 
@@ -941,9 +965,12 @@ ${r.comments.length ? `<p style="margin:0 0 6px;font-size:13px;font-weight:700;l
       this.audit(user, rec.checkedIn ? 'participant.checkin' : 'participant.checkout', { contestId: cid, target: id, label: label(rec) });
     } else if (coll === 'participants' && patch.finalist !== undefined && !!patch.finalist !== !!(before && before.finalist)) {
       this.audit(user, rec.finalist ? 'participant.finalist' : 'participant.unfinalist', { contestId: cid, target: id, label: label(rec) });
-    } else if (coll === 'participants' && before?.status === 'pending' && ['registered', 'declined'].includes(rec.status) && rec.email && rec.source === 'signup') {
-      (this.mailQueue ||= []).push({ pid: id, kind: rec.status === 'declined' ? 'declined' : 'approved' });
-      this.audit(user, rec.status === 'declined' ? 'participant.decline' : 'participant.approve', { contestId: cid, target: id, label: label(rec) });
+    } else if (coll === 'participants' && rec.status === 'waitlisted' && before?.status !== 'waitlisted') {
+      if (rec.email && rec.source === 'signup') (this.mailQueue ||= []).push({ pid: id, kind: 'waitlisted' });
+      this.audit(user, 'participant.waitlist', { contestId: cid, target: id, label: label(rec) });
+    } else if (coll === 'participants' && ['pending', 'waitlisted'].includes(before?.status) && ['registered', 'declined'].includes(rec.status)) {
+      if (rec.email && rec.source === 'signup') (this.mailQueue ||= []).push({ pid: id, kind: rec.status === 'declined' ? 'declined' : 'approved' });
+      this.audit(user, rec.status === 'declined' ? 'participant.decline' : 'participant.approve', { contestId: cid, target: id, label: label(rec) + (before.status === 'waitlisted' ? ' (from the waitlist)' : '') });
     } else if (coll === 'participants' && patch.deleted) {
       this.audit(user, 'participant.delete', { contestId: cid, target: id, label: label(rec) });
     } else if (coll === 'events') {
@@ -1114,7 +1141,7 @@ ${r.comments.length ? `<p style="margin:0 0 6px;font-size:13px;font-weight:700;l
       if (!this.manages(u, c.id)) throw new HttpError(403, 'Only the contest lead or an admin can send feedback');
       if (!this.emailOn) throw new HttpError(400, 'Email isn\'t set up on this server');
       const ids = Array.isArray(body.ids) ? new Set(body.ids.map(String)) : null;
-      const todo = Object.values(db.data.participants).filter(p => p.contestId === c.id && !p.deleted && validEmail(p.email) && !OUT_STATUSES.includes(p.status) && p.status !== 'pending'
+      const todo = Object.values(db.data.participants).filter(p => p.contestId === c.id && !p.deleted && validEmail(p.email) && !NO_PLACE.includes(p.status) && p.status !== 'pending'
         && (!ids || ids.has(p.id)) && (body.again || !p.feedbackSentAt) && this.feedbackFor(p, { comments: false }).length);
       const batch = todo.slice(0, 20);
       let sent = 0, failed = 0;

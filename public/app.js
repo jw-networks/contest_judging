@@ -248,7 +248,7 @@ function roundPicker(cur, onPick, { counts, finalsReady = participants().some(p 
 const heatSize = () => settings().heatSize ?? 14;
 const walkUpSlots = () => settings().walkUps ?? 4;
 function heatLoad(n, exceptId) {
-  const ps = participants().filter(p => p.heat === n && !isOut(p) && p.id !== exceptId);
+  const ps = participants().filter(p => p.heat === n && !isOut(p) && p.status !== 'waitlisted' && p.id !== exceptId);
   const walk = ps.filter(p => p.walkUp).length;
   return { reg: ps.length - walk, walk, total: ps.length, cap: heatSize() + walkUpSlots() };
 }
@@ -831,11 +831,15 @@ async function renderLogin(app) {
 }
 
 // ============================================================ check-in (coordinator, admin)
-// Entry statuses. Sign-ups held for review are 'pending'; withdrawn/declined/no-show entries don't take a place.
+// Entry statuses. Sign-ups held for review are 'pending'; 'waitlisted' entries are waiting for a place.
+// Withdrawn/declined/no-show entries don't take a place, and nor do waitlisted ones.
 const OUT = ['no_show', 'withdrawn', 'declined'];
 const isOut = p => OUT.includes(p.status);
-const STATUS_WORDS = { pending: 'pending review', registered: 'registered', checked_in: 'checked in', on_stage: 'on stage', done: 'done', no_show: 'no-show', withdrawn: 'withdrawn', declined: 'declined' };
+const isHeld = p => p.status === 'pending' || p.status === 'waitlisted'; // not in the contest (yet)
+const STATUS_WORDS = { pending: 'pending review', waitlisted: 'waitlist', registered: 'registered', checked_in: 'checked in', on_stage: 'on stage', done: 'done', no_show: 'no-show', withdrawn: 'withdrawn', declined: 'declined' };
 const statusWord = s => STATUS_WORDS[s || 'registered'] || String(s).replace('_', ' ');
+const waitlist = () => participants().filter(p => p.status === 'waitlisted').sort((a, b) => (a.waitlistedAt || 0) - (b.waitlistedAt || 0) || byNum(a, b));
+const waitlistPos = p => waitlist().findIndex(x => x.id === p.id) + 1 || null;
 const customFields = () => (settings().signup?.fields || []).filter(f => /^q_/.test(f.id));
 
 function viewCheckin() {
@@ -846,14 +850,25 @@ function viewCheckin() {
   const counts = {
     all: all.filter(p => !['withdrawn', 'declined'].includes(p.status)).length,
     pending: all.filter(p => p.status === 'pending').length,
-    waiting: all.filter(p => !p.checkedIn && !isOut(p) && p.status !== 'pending').length,
+    waitlisted: all.filter(p => p.status === 'waitlisted').length,
+    waiting: all.filter(p => !p.checkedIn && !isOut(p) && !isHeld(p)).length,
     in: all.filter(p => p.checkedIn).length, no_show: all.filter(p => p.status === 'no_show').length,
     left: all.filter(p => ['withdrawn', 'declined'].includes(p.status)).length,
   };
   if (ui.ci.filter === 'pending' && !counts.pending) ui.ci.filter = 'all';
+  if (ui.ci.filter === 'waitlisted' && !counts.waitlisted) ui.ci.filter = 'all';
   const dupes = {};
   all.forEach(p => { if (p.number && !isOut(p)) dupes[p.number] = (dupes[p.number] || 0) + 1; });
-  const approve = (p, e) => { e.stopPropagation(); mutate('participants', p.id, { status: 'registered' }); toast(`${partLabel(p)} approved`, 'ok'); };
+  const approve = (p, e) => {
+    e.stopPropagation();
+    const patch = { status: 'registered' };
+    // Off the waitlist with heats on: into a heat with a free place (the server double-checks).
+    if (p.status === 'waitlisted' && heatsOn() && !(p.heat && !p.walkUp && heatHasRoom(p.heat, false, p.id))) patch.heat = nextFreeHeat(false, p.id);
+    if (patch.heat === null && !confirm(`Every heat's regular places are full. Approve ${partLabel(p)} anyway, without a heat? You can place them in a heat later.`)) return;
+    mutate('participants', p.id, patch);
+    toast(`${partLabel(p)} approved${patch.heat ? `, in ${heatLabel(patch.heat).toLowerCase()}` : ''}`, 'ok');
+  };
+  const toWaitlist = (p, e) => { e.stopPropagation(); mutate('participants', p.id, { status: 'waitlisted', checkedIn: false }); toast(`${partLabel(p)} is on the waitlist, number ${waitlist().length}${p.email && S.emailOn ? '. We\'ve emailed them' : ''}`, 'ok'); };
   const decline = (p, e) => { e.stopPropagation(); if (confirm(`Decline ${partLabel(p)}'s sign-up? They won't be in the contest. You can restore it later.`)) mutate('participants', p.id, { status: 'declined', checkedIn: false }); };
   const listEl = h('div.list');
   const draw = () => {
@@ -861,20 +876,24 @@ function viewCheckin() {
     const rows = all.filter(p => {
       if (ui.ci.filter === 'all' && ['withdrawn', 'declined'].includes(p.status)) return false;
       if (ui.ci.filter === 'pending' && p.status !== 'pending') return false;
+      if (ui.ci.filter === 'waitlisted' && p.status !== 'waitlisted') return false;
       if (ui.ci.filter === 'left' && !['withdrawn', 'declined'].includes(p.status)) return false;
-      if (ui.ci.filter === 'waiting' && (p.checkedIn || isOut(p) || p.status === 'pending')) return false;
+      if (ui.ci.filter === 'waiting' && (p.checkedIn || isOut(p) || isHeld(p))) return false;
       if (ui.ci.filter === 'in' && !p.checkedIn) return false;
       if (ui.ci.filter === 'no_show' && p.status !== 'no_show') return false;
       if (ui.ci.division !== 'all' && p.division !== ui.ci.division) return false;
       if (heatsOn() && ui.ci.heat && ui.ci.heat !== 'all' && !inHeat(p, ui.ci.heat)) return false;
       return !q || [p.number, p.name, p.title, p.character, p.series, p.materials, p.email].some(x => String(x || '').toLowerCase().includes(q));
     });
+    if (ui.ci.filter === 'waitlisted') rows.sort((a, b) => waitlistPos(a) - waitlistPos(b));
     listEl.replaceChildren(...(rows.length ? rows.map(p => h('div.item', { onclick: readOnly ? null : () => editParticipant(p), style: readOnly ? { cursor: 'default' } : null },
       h('div.num', p.number || '–'),
       h('div.who', h('div.n', p.title || p.name || '(no name)', dupes[p.number] > 1 ? h('span.badge.no_show', { style: { marginLeft: '.5rem' } }, 'duplicate #') : null),
         h('div.c', h('span.badge.mobile', { class: p.status || 'registered' }, statusWord(p.status)), partSub(p) || '—', p.source === 'signup' ? h('span.src-tag', { title: 'Signed up online' + (p.signupAt ? ' on ' + new Date(p.signupAt).toLocaleString() : '') }, 'online') : null)),
-      h('span.badge', { class: p.status || 'registered' }, statusWord(p.status)),
+      h('span.badge', { class: p.status || 'registered' }, p.status === 'waitlisted' ? `waitlist #${waitlistPos(p)}` : statusWord(p.status)),
       readOnly ? null : p.status === 'pending'
+        ? h('div.row.nowrap', h('button.btn.sm.ghost', { onclick: e => decline(p, e) }, 'Decline'), h('button.btn.sm', { onclick: e => toWaitlist(p, e), title: 'Hold their place in line without approving them yet' }, 'Waitlist'), h('button.btn.ok', { onclick: e => approve(p, e) }, 'Approve'))
+      : p.status === 'waitlisted'
         ? h('div.row.nowrap', h('button.btn.sm.ghost', { onclick: e => decline(p, e) }, 'Decline'), h('button.btn.ok', { onclick: e => approve(p, e) }, 'Approve'))
       : ['withdrawn', 'declined'].includes(p.status)
         ? h('button.btn.sm.ghost', { onclick: e => { e.stopPropagation(); mutate('participants', p.id, { status: 'registered' }); toast(`${partLabel(p)} restored`, 'ok'); } }, 'Restore')
@@ -904,7 +923,7 @@ function viewCheckin() {
     h('div.panel.stack',
       h('div.row', h('div.grow', search), readOnly ? null : h('button.btn.primary', { onclick: () => editParticipant(null, heatsOn() ? { walkUp: true } : {}) }, isMakers() ? '+ Entry' : '+ Walk-in')),
       h('div.row.between',
-        h('div.chips', chip('all', 'All'), counts.pending ? chip('pending', 'Pending review') : null, chip('waiting', 'Not here yet'), chip('in', 'Checked in'), chip('no_show', 'No-show'), counts.left ? chip('left', 'Withdrawn') : null),
+        h('div.chips', chip('all', 'All'), counts.pending ? chip('pending', 'Pending review') : null, counts.waitlisted ? chip('waitlisted', 'Waitlist') : null, chip('waiting', 'Not here yet'), chip('in', 'Checked in'), chip('no_show', 'No-show'), counts.left ? chip('left', 'Withdrawn') : null),
         st.divisions?.length ? h('select', { style: { width: 'auto' }, onchange: e => { ui.ci.division = e.target.value; draw(); } },
           h('option', { value: 'all' }, 'All ' + W.divisions.toLowerCase()), st.divisions.map(d => h('option', { value: d, selected: ui.ci.division === d }, d))) : null),
       listEl));
@@ -931,7 +950,7 @@ function editParticipant(p, defaults = {}) {
   const ta = k => h('textarea', { rows: 3 }, p[k] || '');
   const checkIn = h('input', { type: 'checkbox', checked: isNew ? true : !!p.checkedIn });
   const walkUpBox = h('input', { type: 'checkbox', checked: !!p.walkUp });
-  const statuses = ['pending', 'registered', 'checked_in', ...(isMakers() ? [] : ['on_stage']), 'done', 'no_show', 'withdrawn', 'declined'];
+  const statuses = ['pending', 'waitlisted', 'registered', 'checked_in', ...(isMakers() ? [] : ['on_stage']), 'done', 'no_show', 'withdrawn', 'declined'];
   const status = h('select', statuses.map(s2 => h('option', { value: s2, selected: (p.status || 'registered') === s2 }, statusWord(s2))));
   const keys = [...PART_FIELDS[type].map(x => x[0]), 'division', 'judgeNotes', 'notes', 'contact', 'email', 'phone', ...(isMakers() ? [] : ['music', 'lighting', 'pronunciation', 'intro'])];
   // Answers to the contest's own sign-up questions (custom fields), plus any from questions since removed.
@@ -1614,7 +1633,7 @@ function computeResults(includeDrafts, round = null) {
   const final = round === 'final';
   const jIds = new Set(judges().filter(j => j.active).map(j => j.id));
   const pool = heatsOn() && final ? participants().filter(p => p.finalist) : participants();
-  const rows = pool.filter(p => (!isOut(p) && p.status !== 'pending') || (final && p.finalist && p.status === 'no_show')).map(p => {
+  const rows = pool.filter(p => (!isOut(p) && !isHeld(p)) || (final && p.finalist && p.status === 'no_show')).map(p => {
     const scs = Object.values(S.data.scores).filter(s => s.participantId === p.id && !s.deleted && roundOf(s) === (final ? 'final' : null) && (s.submitted || includeDrafts) && scoreTotal(s, crits).filled);
     scs.forEach(s => jIds.add(s.judgeId));
     const totals = scs.map(s => scoreTotal(s, crits).total);
@@ -1708,7 +1727,7 @@ function paperCardsModal() {
   const js = judges().filter(j => j.active).sort((a, b) => a.displayName.localeCompare(b.displayName));
   const rounds = heatsOn() ? roundOptions() : [];
   const pool = () => {
-    let list = participants().filter(p => !isOut(p) && p.status !== 'pending' && (!o.checkedOnly || p.checkedIn || ['on_stage', 'done'].includes(p.status)));
+    let list = participants().filter(p => !isOut(p) && !isHeld(p) && (!o.checkedOnly || p.checkedIn || ['on_stage', 'done'].includes(p.status)));
     const key = p => p.order ?? (parseFloat(p.number) || 1e9);
     list.sort((a, b) => key(a) - key(b) || byNum(a, b));
     if (o.who === 'blank') return [];
@@ -1846,7 +1865,7 @@ function feedbackSheet(p) {
 function feedbackPanel() {
   const st = settings();
   const fb = st.feedback || {};
-  const scored = participants().filter(p => !isOut(p) && p.status !== 'pending' && feedbackFor(p, { comments: false }).length).sort(byNum);
+  const scored = participants().filter(p => !isOut(p) && !isHeld(p) && feedbackFor(p, { comments: false }).length).sort(byNum);
   const withEmail = scored.filter(p => p.email);
   const unsent = withEmail.filter(p => !p.feedbackSentAt);
   const set = patch => mutate('contests', curId(), { feedback: { released: !!fb.released, comments: fb.comments !== false, ...patch } });
@@ -2050,6 +2069,7 @@ function describeAudit(a) {
     case 'score.submit': return h('span', h('b', a.username), ` submitted a score for ${pl}`);
     case 'participant.checkin': return h('span', h('b', a.username), ` checked in ${a.label}`);
     case 'participant.signup': return h('span', h('b', 'Online sign-up: '), a.label);
+    case 'participant.waitlist': return h('span', h('b', a.username), ` put ${a.label} on the waitlist`);
     case 'participant.approve': return h('span', h('b', a.username), ` approved the sign-up for ${a.label}`);
     case 'participant.decline': return h('span', h('b', a.username), ` declined the sign-up for ${a.label}`);
     case 'email.failed': return h('span', h('b', { style: { color: 'var(--bad)' } }, 'Email not sent: '), a.label);
@@ -2221,6 +2241,7 @@ function signupPanel(cid, online) {
   const touch = () => { const dd = JSON.stringify(d) !== JSON.stringify(saved); saveBtn.disabled = !dd; saveBtn.textContent = dd ? 'Save form & settings' : 'Saved'; discardBtn.hidden = !dd; };
   const mine = participants().filter(p => p.source === 'signup');
   const pending = mine.filter(p => p.status === 'pending').length;
+  const waitlisted = participants().filter(p => p.status === 'waitlisted').length;
   const qr = h('div.qr-box'); if (link && saved.enabled) qr.innerHTML = qrSvg(link, { size: 168 });
   const STATE = [['required', 'Required'], ['optional', 'Optional'], ['hidden', 'Off']];
   const fieldRow = (f, i) => {
@@ -2254,7 +2275,7 @@ function signupPanel(cid, online) {
         h('div.row', h('a.btn.sm', { href: link, target: '_blank', rel: 'noopener' }, 'Open the form ↗'),
           h('button.btn.sm', { onclick: () => downloadQrPng(link, `signup-qr-${slug(c.name)}.png`) }, 'Download QR code'),
           h('button.btn.sm.ghost', { onclick: () => { if (confirm('Make a new link? The current link and QR code stop working straight away.')) quick({ key: randKey() }, 'New link ready. Share the new one.'); } }, 'New link')),
-        h('p.small.muted', `${mine.filter(p => !['withdrawn', 'declined'].includes(p.status)).length} signed up online${pending ? `, ${pending} waiting for review` : ''}.`,
+        h('p.small.muted', `${mine.filter(p => !['withdrawn', 'declined'].includes(p.status)).length} signed up online${pending ? `, ${pending} waiting for review` : ''}${waitlisted ? `, ${waitlisted} on the waitlist` : ''}.`,
           mine.length ? h('button.btn.sm.ghost', { style: { marginLeft: '6px' }, onclick: exportCsv }, 'Download sign-ups (CSV)') : null))) : null,
     h('details.sg-settings', { open: !!ui.sgOpen?.[cid], ontoggle: e => { (ui.sgOpen ||= {})[cid] = e.target.open; } },
       h('summary', 'Form & settings'),
@@ -2560,7 +2581,7 @@ async function signupEntryPage(body, head, key, entryId, token) {
   const q = `?entry=${encodeURIComponent(entryId || '')}&token=${encodeURIComponent(token || '')}`;
   const draw = e => {
     const out = ['withdrawn', 'declined', 'no_show'].includes(e.status);
-    const word = { pending: 'Waiting for review', registered: 'Signed up', checked_in: 'Checked in', on_stage: 'On stage', done: 'Competed', withdrawn: 'Withdrawn', declined: 'Not accepted', no_show: 'Marked as not attending' }[e.status] || e.status;
+    const word = { pending: 'Waiting for review', waitlisted: e.waitlistPos ? `On the waitlist (number ${e.waitlistPos} in line)` : 'On the waitlist', registered: 'Signed up', checked_in: 'Checked in', on_stage: 'On stage', done: 'Competed', withdrawn: 'Withdrawn', declined: 'Not accepted', no_show: 'Marked as not attending' }[e.status] || e.status;
     body.replaceChildren(head, h('div.panel.stack',
       h('span.kicker', 'Your entry'), h('div.big-num', '#' + e.number),
       h('h2', e.title || e.name), h('p.muted', [e.character, e.title ? e.name : ''].filter(Boolean).join(' · ')),
@@ -2570,10 +2591,10 @@ async function signupEntryPage(body, head, key, entryId, token) {
       out ? h('p.muted', e.status === 'withdrawn' ? 'You\'ve withdrawn from this contest. To sign up again, use the contest\'s sign-up link.' : 'Questions? Contact the organizers.')
         : ['on_stage', 'done'].includes(e.status) ? null
         : h('button.btn.danger', { onclick: async ev => {
-          if (!confirm('Withdraw from this contest? Your place goes to someone else. This can\'t be undone here.')) return;
+          if (!confirm(e.status === 'waitlisted' ? 'Take yourself off the waitlist? This can\'t be undone here.' : 'Withdraw from this contest? Your place goes to someone else. This can\'t be undone here.')) return;
           ev.target.disabled = true;
           try { await api(`/api/signup/${key}/withdraw`, { entry: entryId, token }); toast('You\'ve withdrawn', 'ok'); load(); } catch (x) { ev.target.disabled = false; toast(x.message, 'bad'); }
-        } }, 'Withdraw my entry')));
+        } }, e.status === 'waitlisted' ? 'Leave the waitlist' : 'Withdraw my entry')));
   };
   const load = () => api(`/api/signup/${key}/entry${q}`).then(draw).catch(e => body.replaceChildren(head, h('div.panel.stack', h('p', e.message))));
   load();

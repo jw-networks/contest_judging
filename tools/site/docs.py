@@ -62,13 +62,14 @@ body = '''
   <h2>Sign-up links</h2>
   <p>In <b>Setup → Sign-ups</b>, turn sign-ups on to get a link and a QR code for the contest. Download the QR code as an image for posters and tables.</p>
   <ul>
-    <li><b>Review:</b> by default, sign-ups wait as <i>pending review</i> in Check-in until someone approves or declines them. Turn review off to accept everyone straight away.</li>
+    <li><b>Review:</b> by default, sign-ups wait as <i>pending review</i> in Check-in until someone approves, waitlists or declines them. Turn review off to accept everyone straight away.</li>
+    <li><b>Waitlist:</b> tap <b>Waitlist</b> to hold someone's place in line without approving them yet. Waitlisted people don't take a place, so they don't count toward a full contest or a full heat. They see their number in line on their private page. Approve them when a place opens: with heats on, Spotlight puts them in a heat with a free place.</li>
     <li><b>Your questions:</b> name, character and email are required by default. Each built-in question can be required, optional or off. You can also add your own questions, and contestants can attach up to three reference photos.</li>
     <li><b>Limits:</b> set a closing time or a maximum. With heats, sign-ups only fill regular places, so walk-up places stay free.</li>
     <li><b>Withdrawing:</b> each contestant gets a private link to their entry, and can withdraw until they go on stage.</li>
     <li><b>New link:</b> stops the old link and QR code working straight away.</li>
   </ul>
-  <p>With email set up, contestants get a confirmation with their private link, then an email when you approve or decline them.</p>
+  <p>With email set up, contestants get a confirmation with their private link, then an email when you approve, waitlist or decline them.</p>
 </section>
 
 <section id="heats">
@@ -87,7 +88,7 @@ body = '''
   <p>The <b>Check-in</b> screen lists every entry, with search by name, character, number or email.</p>
   <ul>
     <li>Tap an entry to check them in, or to edit their details.</li>
-    <li>Pending online sign-ups show at the top with <b>Approve</b> and <b>Decline</b>.</li>
+    <li>Pending online sign-ups show at the top with <b>Approve</b>, <b>Waitlist</b> and <b>Decline</b>. The <b>Waitlist</b> filter lists waitlisted people in order.</li>
     <li>Add walk-ups on the spot. With heats on, Spotlight shows how many places are left in each heat.</li>
     <li>Mark people who don't turn up as no-shows. They're left out of results.</li>
   </ul>

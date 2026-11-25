@@ -173,6 +173,7 @@ Each contest can have its own sign-up form. Contest leads and admins turn it on 
 - **Review:** sign-ups wait as *pending review* in Check-in until someone taps Approve or Decline. Turn review off to accept everyone straight away.
 - **Form:** name, character and email are required by default. Each built-in question can be required, optional or off. You can rename it, or add your own questions (short answer, long answer, choose one, tick box). Contestants can attach up to 3 reference photos.
 - **Limits:** an optional closing time and maximum. With heats on, sign-ups fill regular heat places only, so walk-up places stay free.
+- **Waitlist:** in Check-in, **Waitlist** holds someone's place in line without approving them. Waitlisted people don't count toward the maximum or toward heat places, and see their number in line on their private page (and by email). Approving them later puts them in a heat with a free place; if every heat is full, they're approved without a heat for you to place by hand. Staff can also set any entry to *waitlist* in its editor.
 - **Withdrawing:** after signing up, each contestant gets a private link to their entry and can withdraw from it until they go on stage. The link's secret is stored only as a hash.
 - **Privacy:** emails, phone numbers and answers are visible to leads, coordinators and admins only, never to judges, tech, emcees or the public monitor. **New link** stops the old link and QR code working straight away.
 - **Spam:** a hidden trap field, plus at most 8 sign-ups per network address per hour.
