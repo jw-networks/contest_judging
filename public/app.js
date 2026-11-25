@@ -811,7 +811,7 @@ async function renderLogin(app) {
   const recent = Object.values(accounts);
   app.dataset.shell = '';
   app.replaceChildren(h('div.login',
-    h('div.logo', h('img', { src: 'icons/icon.svg', alt: '' }), h('h1', APP_NAME), h('span.kicker', 'Every entry. Every score. Live.')),
+    h('div.logo', h('img', { src: 'icons/icon.svg', alt: '' }), h('h1', APP_NAME), h('span.kicker', 'Your stage. Your judges. Your time.')),
     h('form.panel.stack', {
       onsubmit: async e => {
         e.preventDefault(); err.textContent = ''; btn.disabled = true; btn.textContent = 'Signing in…';
