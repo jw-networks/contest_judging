@@ -692,3 +692,10 @@ pre.handover { margin: 0; padding: 12px; white-space: pre-wrap; font: 600 14px/1
 /* Judge sheets print landscape where the browser supports named pages (Chrome, Edge); otherwise portrait still fits. */
 .pc-sheet { page: pc-landscape; }
 @page pc-landscape { size: letter landscape; margin: 10mm; }
+
+/* platform: website requests */
+.inbox-list { display: grid; gap: 8px; }
+.inbox-item { background: var(--panel-2); border: 1px solid var(--line); padding: 12px 14px; display: grid; gap: 6px; }
+.inbox-item.done { opacity: .6; }
+.inbox-top { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.inbox-msg { margin: 0; white-space: pre-wrap; background: var(--field); padding: 8px 10px; border-left: 3px solid var(--cyan); }

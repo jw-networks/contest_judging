@@ -54,9 +54,12 @@ jobs:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           EMAIL_FROM: ${{ vars.EMAIL_FROM }}
           EMAIL_REPLY_TO: ${{ vars.EMAIL_REPLY_TO }}
+          CONTACT_TO: ${{ vars.CONTACT_TO }}
         run: |
           if [ -z "$RESEND_API_KEY" ]; then echo "Email is off (no RESEND_API_KEY secret)."; exit 0; fi
           if [ -z "$EMAIL_FROM" ]; then echo "::warning::RESEND_API_KEY is set but the EMAIL_FROM repository variable isn't, so email stays off."; exit 0; fi
           printf '%s' "$RESEND_API_KEY" | npx --yes wrangler@3 secret put RESEND_API_KEY
           printf '%s' "$EMAIL_FROM" | npx --yes wrangler@3 secret put EMAIL_FROM
           if [ -n "$EMAIL_REPLY_TO" ]; then printf '%s' "$EMAIL_REPLY_TO" | npx --yes wrangler@3 secret put EMAIL_REPLY_TO; fi
+          # Where website purchase and support requests are emailed.
+          if [ -n "$CONTACT_TO" ]; then printf '%s' "$CONTACT_TO" | npx --yes wrangler@3 secret put CONTACT_TO; fi

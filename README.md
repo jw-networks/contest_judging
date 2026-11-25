@@ -60,7 +60,7 @@ Copy the token. You'll paste it in step 4.
 3. **Actions → "Deploy app to GitHub Pages" → Run workflow**
 
 ### 7. Sign in
-Open **https://spotlight.drimworksprops.com/** (the custom domain; the old https://jw-networks.github.io/contest_judging/ redirects there) and sign in as `admin` with your `ADMIN_PASSWORD`. You'll be asked to choose a new password. On the **Admin** page, create your contests and accounts. Then, in each contest's **Contest setup**, set its criteria, give people roles, and import contestants.
+Open the app at **https://spotlight.drimworksprops.com/app/** (the website is at the root; the old https://jw-networks.github.io/contest_judging/ address redirects there) and sign in as `admin` with your `ADMIN_PASSWORD`. You'll be asked to choose a new password. On the **Admin** page, create your contests and accounts. Then, in each contest's **Contest setup**, set its criteria, give people roles, and import contestants.
 
 On each tablet, open the same address and choose **Add to Home Screen / Install app**.
 
@@ -133,6 +133,16 @@ From the repo: `npm run local` (same thing). The zip is rebuilt automatically by
 
 **Network notes:** use a normal (not "guest") Wi-Fi so devices can see each other, and give the server a fixed address on the router if you can. The server only answers to its IP address, `localhost`, `.local`/`.lan` names, the computer's own name, or names you add with `SPOTLIGHT_HOSTS`, and only to pages it served itself. Over plain http, browsers don't keep an offline copy of the app shell, so keep the app open on each tablet; scores are saved on the tablet either way. Put `cert.pem` and `key.pem` in `spotlight-data/` to serve https instead.
 
+## The website
+
+`site/` is the customer website, served at the root of the domain: home, pricing, docs and support. The judging app (`public/`) is served at `/app/`. The Pages workflow puts the two together.
+
+- **Editing pages:** each page is built from a small Python file in `tools/site/` (the header and footer are shared). Edit it, then run `python3 tools/site/build.py`. Styles are in `site/site.css`, and the hero scoreboard, forms and docs search are in `site/site.js`.
+- **Prices** are on the pricing page (`tools/site/pricing.py`).
+- **Screenshots** in `site/img/` are real app screens from a demo show with invented contestants.
+- **Forms:** "Get started" and "Contact us" send requests to the **Requests** inbox on the platform screen, where open "my show is today" messages come first. They're also emailed to the `CONTACT_TO` repository variable, if you set it (needs email to be on); replies go straight to the customer. A hidden trap field and a limit of 5 per address per hour keep bots out.
+- **Old links keep working:** links from before the website existed (`/#/signup/…`, reset links, org links) and home-screen apps installed from the old address all open the app at `/app/`. A small `site/sw.js` retires the old offline cache from when the app lived at the root, and devices stay signed in.
+
 ## Email
 
 Spotlight sends a few emails, all optional and all off until you set them up:
@@ -150,6 +160,7 @@ If an email fails (for example Resend is down), nothing else is affected, and th
    - add the **secret** `RESEND_API_KEY` (the API key)
    - add the **variable** `EMAIL_FROM`, e.g. `Spotlight <noreply@yourdomain.com>` (it must use the verified domain)
    - optional: add the **variable** `EMAIL_REPLY_TO`, an address that receives replies
+   - optional: add the **variable** `CONTACT_TO`, where website purchase and support requests are emailed
 4. Re-run the "Deploy API (Cloudflare Worker)" workflow (Actions tab → Run workflow).
 5. On the platform screen, **Email** shows "On"; use **Send test** to check it.
 

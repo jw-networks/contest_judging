@@ -64,6 +64,7 @@ export default {
     let res;
     try {
       if (url.pathname.startsWith('/api/platform/')) res = await platform(req, env, url);
+      else if (url.pathname === '/api/site/request') res = await siteRequest(req, env, okOrigin);
       else {
         const org = await resolveOrg(env, req.headers.get('X-Spotlight-Org') || url.searchParams.get('org'));
         if (!org) res = json(404, { error: 'No organization with that code. Check the code and try again.' });
@@ -98,6 +99,41 @@ function appBase(env, base) {
     if (!allowed.includes(u.origin) || !/^#\/(o\/[a-z0-9-]{1,30}\/)?$/.test(u.hash) || u.search || u.username || u.password) return '';
     return u.origin + u.pathname + u.hash;
   } catch { return ''; }
+}
+
+// ---------------------------------------------------------------- website forms (purchase and support requests)
+const SITE_KINDS = { purchase: 'Purchase request', support: 'Support request' };
+async function siteRequest(req, env, okOrigin) {
+  if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed');
+  if (!okOrigin) throw new HttpError(403, 'Please use the form on the Spotlight website');
+  if (!env.DIRECTORY) throw new HttpError(404, 'Not available on this server');
+  const b = await req.json().catch(() => ({}));
+  const t = (v, n) => String(v ?? '').trim().slice(0, n);
+  const r = {
+    kind: SITE_KINDS[b.kind] ? b.kind : 'support', name: t(b.name, 120), email: t(b.email, 200), org: t(b.org, 120),
+    plan: t(b.plan, 40), event: t(b.event, 160), date: t(b.date, 20), entries: t(b.entries, 40), contestType: t(b.contestType, 40),
+    topic: t(b.topic, 80), message: t(b.message, 4000), urgent: !!b.urgent,
+  };
+  if (b.website) return json(200, { ok: true }); // the hidden trap field: a bot filled it in
+  if (!r.name) throw new HttpError(400, 'Please add your name');
+  if (!validEmail(r.email)) throw new HttpError(400, 'Please check your email address');
+  if (r.kind === 'support' && !r.message) throw new HttpError(400, 'Please tell us what you need help with');
+  const { request } = await directory(env, '/requests/add', { request: r, ip: req.headers.get('CF-Connecting-IP') || '' });
+  // Email the Spotlight team (replies go straight to the customer).
+  if (env.CONTACT_TO && emailOn(env)) {
+    const rows = r.kind === 'purchase'
+      ? [['Organization', r.org], ['Plan', r.plan], ['Event', r.event], ['Date', r.date], ['Entries', r.entries], ['Contest type', r.contestType]]
+      : [['Organization code', r.org], ['Topic', r.topic]];
+    const sent = await sendViaResend(env, env.FETCH || ((...a) => fetch(...a)), {
+      to: env.CONTACT_TO, replyTo: r.email,
+      subject: `${r.urgent ? '[SHOW TODAY] ' : ''}${SITE_KINDS[r.kind]}: ${r.name}${r.org ? ' (' + r.org + ')' : ''}`,
+      ...message({ kicker: 'Spotlight website', title: SITE_KINDS[r.kind] + (r.urgent ? ': their show is today' : ''),
+        lines: [`From ${r.name} <${r.email}>`, ...rows.filter(([, v]) => v).map(([k, v]) => `${k}: ${v}`), ...(r.message ? ['', r.message] : [])],
+        after: ['Reply to this email to answer them. It\'s also in the Requests inbox on your platform screen.'] }),
+    });
+    if (!sent.ok) console.error('request email failed', sent.error);
+  }
+  return json(200, { ok: true, id: request.id });
 }
 
 // ---------------------------------------------------------------- platform (Spotlight's own super-admin)
@@ -174,6 +210,8 @@ async function platform(req, env, url) {
     if (!r.ok) throw new HttpError(r.status, d.error || 'Failed');
     return json(200, d);
   }
+  if (route === 'GET /api/platform/requests') return json(200, { ...(await directory(env, '/requests/list')), emailTo: env.CONTACT_TO || '' });
+  if (route === 'PATCH /api/platform/requests/:id') return json(200, await directory(env, '/requests/update', { id, done: !!body.done, note: body.note }));
   if (route === 'GET /api/platform/email') return json(200, { on: emailOn(env), from: env.EMAIL_FROM || '', replyTo: env.EMAIL_REPLY_TO || '' });
   if (route === 'POST /api/platform/email') {
     const to = String(body.to || '').trim();
@@ -237,6 +275,33 @@ export class Directory {
         return json(200, { org: org ? { id: org.id, code: org.code, name: org.name, suspended: !!org.suspended, default: !!org.default } : null });
       }
       if (url.pathname === '/list') return json(200, { orgs: list.sort((a, b) => (b.default ? 1 : 0) - (a.default ? 1 : 0) || a.name.localeCompare(b.name)) });
+      // Website requests (purchase / support): newest first, at most 1000 kept.
+      if (url.pathname === '/requests/add') {
+        const now = Date.now();
+        const hits = ((await this.ctx.storage.get('reqHits')) || {});
+        for (const k of Object.keys(hits)) hits[k] = hits[k].filter(t => now - t < 3600_000);
+        const ipKey = body.ip || 'unknown';
+        const mine = hits[ipKey] || [];
+        if (mine.length >= 5) throw new HttpError(429, 'You\'ve sent a few already. Please wait an hour, or email us directly.');
+        const all = (await this.ctx.storage.get('requests')) || [];
+        if (all.filter(r => now - r.at < 86400_000).length >= 300) throw new HttpError(429, 'We\'re getting a lot of messages right now. Please try again later.');
+        mine.push(now); hits[ipKey] = mine;
+        const request = { ...body.request, id: Math.random().toString(36).slice(2, 10) + now.toString(36), at: now, done: false };
+        all.unshift(request);
+        await this.ctx.storage.put('requests', all.slice(0, 1000));
+        await this.ctx.storage.put('reqHits', hits);
+        return json(200, { request });
+      }
+      if (url.pathname === '/requests/list') return json(200, { requests: (await this.ctx.storage.get('requests')) || [] });
+      if (url.pathname === '/requests/update') {
+        const all = (await this.ctx.storage.get('requests')) || [];
+        const r = all.find(x => x.id === body.id);
+        if (!r) throw new HttpError(404, 'No such request');
+        r.done = !!body.done; r.doneAt = r.done ? Date.now() : null;
+        if (body.note !== undefined) r.note = String(body.note || '').slice(0, 2000);
+        await this.ctx.storage.put('requests', all);
+        return json(200, { request: r });
+      }
       if (url.pathname === '/create') {
         if (list.some(o => o.code === body.code)) throw new HttpError(409, `The code "${body.code}" is already taken`);
         const id = crypto.randomUUID().replace(/-/g, '').slice(0, 16);

@@ -102,6 +102,7 @@ const env = {
   FETCH: fakeGitHub,
   // Email is on in development (fake Resend above). DEV_EMAIL=0 turns it off.
   ...(process.env.DEV_EMAIL === '0' ? {} : { RESEND_API_KEY: 'dev-key', EMAIL_FROM: 'Spotlight <noreply@example.com>' }),
+  ...(process.env.CONTACT_TO ? { CONTACT_TO: process.env.CONTACT_TO } : {}),
 };
 env.CONTEST = { idFromName: n => n, get: n => durable(n, ContestDB).obj };
 env.DIRECTORY = { idFromName: n => n, get: n => durable('dir:' + n, Directory).obj };

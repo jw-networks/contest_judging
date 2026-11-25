@@ -1,9 +1,9 @@
-name: Deploy app to GitHub Pages
+name: Deploy site and app to GitHub Pages
 
 on:
   push:
     branches: [main]
-    paths: ['public/**', '.github/workflows/pages.yml']
+    paths: ['public/**', 'site/**', '.github/workflows/pages.yml']
   workflow_dispatch:
 
 permissions:
@@ -24,6 +24,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The website is the site root; the judging app (public/) is served at /app/.
+      - name: Put the site and the app together
+        run: |
+          mkdir _site
+          cp -r site/. _site/
+          cp -r public _site/app
+
       - name: Point the app at the API
         env:
           API_URL: ${{ vars.API_URL }}
@@ -33,12 +40,12 @@ jobs:
             exit 0
           fi
           case "$API_URL" in https://*) ;; *) echo "::error::API_URL must start with https://"; exit 1;; esac
-          node -e 'require("fs").writeFileSync("public/config.js", "window.APP_CONFIG = " + JSON.stringify({ serverUrl: process.env.API_URL.replace(/\/+$/, "") }) + ";\n")'
+          node -e 'require("fs").writeFileSync("_site/app/config.js", "window.APP_CONFIG = " + JSON.stringify({ serverUrl: process.env.API_URL.replace(/\/+$/, "") }) + ";\n")'
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: public
+          path: _site
 
   deploy:
     needs: build

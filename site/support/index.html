@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Support · Spotlight</title>
+<meta name="description" content="Get help with Spotlight: answers to common questions, the documentation, and a way to reach the team.">
+<meta name="theme-color" content="#1b1a1b">
+<link rel="icon" href="/app/icons/icon.svg" type="image/svg+xml">
+<link rel="preload" href="/app/fonts/Roboto-Variable.ttf" as="font" type="font/ttf" crossorigin>
+<link rel="stylesheet" href="/site.css">
+<meta property="og:title" content="Support · Spotlight">
+<meta property="og:description" content="Get help with Spotlight: answers to common questions, the documentation, and a way to reach the team.">
+<meta property="og:image" content="https://spotlight.drimworksprops.com/img/og.png">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+</head>
+<body>
+<a class="hp" href="#main">Skip to content</a>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="/"><img src="/app/icons/icon.svg" alt="" width="30" height="30">Spotlight</a>
+    <nav class="nav" id="nav" aria-label="Main">
+      <a href="/#how">How it works</a>
+      <a href="/pricing/">Pricing</a>
+      <a href="/docs/">Docs</a>
+      <a href="/support/" aria-current="page">Support</a>
+    </nav>
+    <div class="top-actions">
+      <a class="signin" href="/app/">Sign in</a>
+      <a class="btn primary small" href="/pricing/#request">Get started</a>
+    </div>
+    <button class="menu-btn" aria-controls="nav" aria-expanded="false" aria-label="Menu"><svg width="20" height="14" viewBox="0 0 20 14" aria-hidden="true"><path d="M0 1h20M0 7h20M0 13h20" stroke="currentColor" stroke-width="2"/></svg></button>
+  </div>
+</header>
+<main id="main">
+
+<div class="page-head"><div class="wrap">
+  <h1>Support</h1>
+  <p class="lede">Most answers are in the docs. For anything else, send us a message: a real person replies.</p>
+</div></div>
+
+<section class="band" style="padding-top:0">
+  <div class="wrap split">
+    <div>
+      <h2 style="font-size:34px;margin-bottom:22px">Quick answers</h2>
+      <div class="help-list">
+        <a href="/docs/#signing-in"><b>Someone can't sign in</b><span>Organization codes, forgotten passwords and first sign-in.</span></a>
+        <a href="/docs/#judging"><b>A judge's scores look wrong</b><span>Drafts, submitting, and how admins adjust a score.</span></a>
+        <a href="/docs/#offline"><b>The Wi-Fi is down</b><span>What keeps working, and how devices catch up.</span></a>
+        <a href="/docs/#paper"><b>A tablet died mid-show</b><span>Print paper score cards and type them in later.</span></a>
+        <a href="/docs/#heats"><b>Heats and finals</b><span>Places, walk-ups and how finalists are chosen.</span></a>
+        <a href="/docs/#signups"><b>Sign-up links</b><span>Reviewing entries, closing sign-ups, new links.</span></a>
+      </div>
+      <div class="urgent">
+        <b>Is your show today?</b>
+        <p style="margin:6px 0 0">Tick “My show is today” on the form. Those messages go to the top of the queue.</p>
+      </div>
+    </div>
+
+    <div id="contact">
+      <h2 style="font-size:34px;margin-bottom:22px">Contact us</h2>
+      <form class="form" data-kind="support" novalidate>
+        <label class="field"><span>Your name</span><input name="name" autocomplete="name" required maxlength="120"></label>
+        <label class="field"><span>Email</span><input name="email" type="email" autocomplete="email" required maxlength="200"></label>
+        <label class="field"><span>Organization code <em>(if you have one)</em></span><input name="org" maxlength="60" autocapitalize="none"></label>
+        <label class="field"><span>What's it about?</span><select name="topic"><option>A problem during setup</option><option>A problem during a show</option><option>Accounts and sign-in</option><option>Billing and plans</option><option>A question</option><option>An idea for Spotlight</option></select></label>
+        <label class="field full"><span>Message</span><textarea name="message" required maxlength="4000" placeholder="What happened, on which screen, and what you expected."></textarea></label>
+        <label class="check full"><input type="checkbox" name="urgent" value="1">My show is today</label>
+        <div class="hp" aria-hidden="true"><label>Leave this empty <input name="website" tabindex="-1" autocomplete="off"></label></div>
+        <p class="form-msg" role="alert"></p>
+        <div class="full"><button class="btn primary" type="submit">Send message</button></div>
+      </form>
+    </div>
+  </div>
+</section>
+</main>
+<footer class="foot">
+  <div class="wrap">
+    <div><a class="brand" href="/" style="padding:0;margin-bottom:12px"><img src="/app/icons/icon.svg" alt="" width="26" height="26">Spotlight</a>
+      <p style="margin:0">Contest judging for cosplay and maker shows.<br>Made by Drimworks Props.</p></div>
+    <div><b>Product</b><a href="/#how">How it works</a><a href="/pricing/">Pricing</a><a href="/app/">Sign in</a></div>
+    <div><b>Help</b><a href="/docs/">Docs</a><a href="/support/">Support</a><a href="/docs/#offline">Running without internet</a></div>
+    <div><b>Get started</b><a href="/pricing/#request">Request Spotlight</a><a href="/support/#contact">Contact us</a></div>
+  </div>
+</footer>
+<script src="/app/config.js"></script>
+<script src="/site.js" defer></script>
+</body>
+</html>

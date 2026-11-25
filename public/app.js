@@ -2734,7 +2734,7 @@ function viewPlatform() {
                 if (!o.suspended && !confirm(`Suspend ${o.name}? Nobody in it can sign in or sync until you reactivate it. Nothing is deleted.`)) return;
                 act(() => call('/orgs/' + o.id, { suspended: !o.suspended }, 'PATCH'), o.suspended ? 'Reactivated' : 'Suspended');
               } }, o.suspended ? 'Reactivate' : 'Suspend'))))))))),
-      h('div.panel.stack', h('h3', 'New organization'),
+      h('div.panel.stack.new-org', h('h3', 'New organization'),
         h('p.small.muted', 'Each organization gets its own separate database, admin and events. Staff sign in with its code, or use its link.'),
         h('div.form-grid', h('label.field', h('span', 'Name'), name), h('label.field', h('span', 'Sign-in code'), code),
           h('label.field', h('span', 'First admin username'), admin), h('label.field', h('span', 'First admin\'s email'), aemail), h('label.field', h('span', 'First event'), event)),
@@ -2749,10 +2749,38 @@ function viewPlatform() {
         : h('p.small.muted', 'Off. To turn it on: make a free Resend account, verify your domain there, then add the RESEND_API_KEY secret and the EMAIL_FROM variable (e.g. Spotlight <noreply@yourdomain.com>) to the GitHub repo and redeploy the API. See the README.'),
       m.on ? h('div.row.nowrap', to, h('button.btn', { onclick: async e => { e.target.disabled = true; try { await call('/email', { to: to.value.trim() }); toast('Test email sent', 'ok'); } catch (x) { toast(x.message, 'bad'); } e.target.disabled = false; } }, 'Send test')) : null);
   }).catch(() => mailBox.remove());
-  if (S.net === 'online' || S.net === 'syncing') { load(); loadMail(); }
+  // Requests from the website's forms (purchase and support).
+  const reqBox = h('div.panel.stack', h('h3', 'Requests'), h('p.small.muted', 'Loading…'));
+  const loadReqs = () => call('/requests').then(({ requests, emailTo }) => {
+    const showDone = !!ui.reqDone;
+    const open = requests.filter(r => !r.done);
+    // Open "my show is today" requests first (the support page promises that), then newest first.
+    const list = (showDone ? requests : open).slice().sort((x, y) => (!y.done && y.urgent) - (!x.done && x.urgent) || y.at - x.at);
+    const KIND = { purchase: 'Purchase', support: 'Support' };
+    reqBox.replaceChildren(
+      h('div.row.between', h('h3', `Requests${open.length ? ` (${open.length} open)` : ''}`),
+        h('label.check', h('input', { type: 'checkbox', checked: showDone, onchange: e => { ui.reqDone = e.target.checked; loadReqs(); } }), 'Show done')),
+      h('p.small.muted', 'From the website\'s Get started and Contact forms. ', emailTo ? `Each one is also emailed to ${emailTo}.` : 'To get them by email too, add the CONTACT_TO variable (your address) to the GitHub repo and redeploy the API.'),
+      list.length ? h('div.inbox-list', list.map(r => h('div.inbox-item', { class: r.done ? 'done' : '' },
+        h('div.inbox-top',
+          h('span.badge', { class: r.kind === 'purchase' ? 'registered' : 'checked_in' }, KIND[r.kind] || r.kind),
+          r.urgent ? h('span.badge.no_show', 'Show today') : null,
+          h('b', r.name), h('a', { href: `mailto:${r.email}?subject=${encodeURIComponent('Spotlight: ' + (r.kind === 'purchase' ? 'getting started' : r.topic || 'your message'))}` }, r.email),
+          h('span.grow'), h('span.small.muted', fmtTime(r.at))),
+        h('div.small', [r.org && (r.kind === 'purchase' ? 'Organization: ' : 'Org code: ') + r.org, r.plan && 'Plan: ' + r.plan, r.event && 'Event: ' + r.event, r.date && 'Date: ' + r.date, r.entries && 'Entries: ' + r.entries, r.contestType && 'Type: ' + r.contestType, r.topic && 'Topic: ' + r.topic].filter(Boolean).join(' · ')),
+        r.message ? h('p.inbox-msg', r.message) : null,
+        h('div.row',
+          r.kind === 'purchase' && !r.done ? h('button.btn.sm', { onclick: () => {
+            ui.newOrg = { name: r.org, code: (r.org || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 30), codeEdited: false, admin: 'admin', event: r.event || '', email: r.email };
+            render(); setTimeout(() => document.querySelector('.new-org')?.scrollIntoView({ behavior: 'smooth' }), 50);
+          } }, 'Set up their organization') : null,
+          h('button.btn.sm.ghost', { onclick: async () => { try { await call('/requests/' + r.id, { done: !r.done }, 'PATCH'); loadReqs(); } catch (e) { toast(e.message, 'bad'); } } }, r.done ? 'Reopen' : 'Mark done'))))) 
+        : h('p.small.muted', showDone ? 'No requests yet.' : 'Nothing open. New requests from the website appear here.'));
+  }).catch(e => reqBox.replaceChildren(h('h3', 'Requests'), h('p.small.muted', e.message)));
+  if (S.net === 'online' || S.net === 'syncing') { load(); loadMail(); loadReqs(); }
   return h('div.stack',
     h('div.panel', h('span.kicker', 'Spotlight platform'), h('p.small.muted', { style: { margin: '.3rem 0 0' } }, 'Only you see this. Organizations are your customers: each has its own data, admin, events and contests.')),
-    box, mailBox);
+    reqBox, box, mailBox);
 }
 
 // ============================================================ admin (account-wide)

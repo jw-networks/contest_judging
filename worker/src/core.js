@@ -1259,7 +1259,7 @@ ${r.comments.length ? `<p style="margin:0 0 6px;font-size:13px;font-weight:700;l
       return json(200, { user: this.publicUser(u) });
     }
 
-    // ---- reference photos (stored in Cloudflare storage, never mirrored to GitHub)
+    // ---- reference photos (stored in Cloudflare storage; backed up to the data repo one file per photo)
     if (url.pathname === '/api/photos' && req.method === 'POST') {
       const actor = await this.requireUser(req);
       const pid = url.searchParams.get('participant') || '';
