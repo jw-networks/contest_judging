@@ -60,7 +60,7 @@ Copy the token. You'll paste it in step 4.
 3. **Actions → "Deploy app to GitHub Pages" → Run workflow**
 
 ### 7. Sign in
-Open **https://jw-networks.github.io/contest_judging/** and sign in as `admin` with your `ADMIN_PASSWORD`. You'll be asked to choose a new password. On the **Admin** page, create your contests and accounts. Then, in each contest's **Contest setup**, set its criteria, give people roles, and import contestants.
+Open **https://spotlight.drimworksprops.com/** (the custom domain; the old https://jw-networks.github.io/contest_judging/ redirects there) and sign in as `admin` with your `ADMIN_PASSWORD`. You'll be asked to choose a new password. On the **Admin** page, create your contests and accounts. Then, in each contest's **Contest setup**, set its criteria, give people roles, and import contestants.
 
 On each tablet, open the same address and choose **Add to Home Screen / Install app**.
 

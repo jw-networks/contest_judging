@@ -23,7 +23,7 @@ new_sqlite_classes = ["Directory"]
 
 [vars]
 # The GitHub Pages site allowed to call this API (comma-separate several)
-ALLOWED_ORIGINS = "https://jw-networks.github.io"
+ALLOWED_ORIGINS = "https://spotlight.drimworksprops.com,https://jw-networks.github.io"
 # PRIVATE repo that holds the data file
 DATA_REPO = "jw-networks/contest_judging_data"
 DATA_BRANCH = "main"
