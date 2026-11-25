@@ -133,6 +133,28 @@ From the repo: `npm run local` (same thing). The zip is rebuilt automatically by
 
 **Network notes:** use a normal (not "guest") Wi-Fi so devices can see each other, and give the server a fixed address on the router if you can. The server only answers to its IP address, `localhost`, `.local`/`.lan` names, the computer's own name, or names you add with `SPOTLIGHT_HOSTS`, and only to pages it served itself. Over plain http, browsers don't keep an offline copy of the app shell, so keep the app open on each tablet; scores are saved on the tablet either way. Put `cert.pem` and `key.pem` in `spotlight-data/` to serve https instead.
 
+## Email
+
+Spotlight sends a few emails, all optional and all off until you set them up:
+
+- **Sign-ups:** a confirmation with the contestant's entry number and private link (to check their entry or withdraw). Then "you're in" or "not accepted" when staff approve or decline a held sign-up.
+- **Forgot password:** staff can set an email on their account (account menu → Your email; admins can also set it on the Admin page). "Forgot your password?" on the sign-in screen emails a link that works once, within an hour. Admins and leads only see the emails they're allowed to see: only admins see other people's.
+- **New organizations:** put the first admin's email on the platform screen and they get their sign-in details by email.
+
+If an email fails (for example Resend is down), nothing else is affected, and the failure is noted in that organization's audit log. Links in emails only ever point at the app's own site (`ALLOWED_ORIGINS`).
+
+**Turning it on (about 10 minutes):**
+1. Make a free account at [resend.com](https://resend.com) and verify your domain there (it gives you DNS records to add).
+2. Create an API key in Resend.
+3. In this GitHub repo, go to Settings → Secrets and variables → Actions:
+   - add the **secret** `RESEND_API_KEY` (the API key)
+   - add the **variable** `EMAIL_FROM`, e.g. `Spotlight <noreply@yourdomain.com>` (it must use the verified domain)
+   - optional: add the **variable** `EMAIL_REPLY_TO`, an address that receives replies
+4. Re-run the "Deploy API (Cloudflare Worker)" workflow (Actions tab → Run workflow).
+5. On the platform screen, **Email** shows "On"; use **Send test** to check it.
+
+The local network server never sends email.
+
 ## Contestant sign-up links
 
 Each contest can have its own sign-up form. Contest leads and admins turn it on in **Setup → Sign-ups**, which gives a link and a QR code (download it as a PNG for posters and tables).

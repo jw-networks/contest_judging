@@ -1,3 +1,4 @@
+import { message, validEmail } from './mail.js';
 /*
  * Spotlight contest logic, shared by the Cloudflare Worker (Durable Object) and the local dev server.
  * Uses only Web-standard APIs (WebCrypto, Request/Response), so it runs anywhere.
@@ -276,7 +277,7 @@ export class Contest {
     return true;
   }
 
-  async seed(adminPassword, { username = 'admin', displayName = 'Administrator', eventName = '' } = {}) {
+  async seed(adminPassword, { username = 'admin', displayName = 'Administrator', eventName = '', email = '' } = {}) {
     if (!adminPassword || String(adminPassword).length < 8) throw new Error('ADMIN_PASSWORD secret must be set (8+ characters) before first start');
     const now = Date.now();
     this.db = { rev: 0, schema: SCHEMA, users: {}, sessions: {}, audit: [], data: Object.fromEntries(COLLS.map(c => [c, {}])) };
@@ -285,7 +286,7 @@ export class Contest {
     this.db.data.events.e1 = { id: 'e1', name: str(eventName, 120), order: 1, createdAt: Date.now(), rev: ++this.db.rev };
     this.createContest({ id: 'main', name: 'Cosplay Contest', type: 'cosplay', eventId: 'e1' }, 'system');
     const id = newId();
-    db.users[id] = { id, username: str(username, 40).toLowerCase(), displayName: str(displayName, 80), role: 'admin', contests: {}, ...(await hashPassword(adminPassword)), active: true, mustChangePassword: true, createdAt: now, rev: ++db.rev };
+    db.users[id] = { id, username: str(username, 40).toLowerCase(), displayName: str(displayName, 80), role: 'admin', contests: {}, ...(await hashPassword(adminPassword)), active: true, mustChangePassword: true, ...(validEmail(email) ? { email: String(email).trim() } : {}), createdAt: now, rev: ++db.rev };
     this.markAllDirty();
     await this.save();
   }
@@ -437,7 +438,7 @@ export class Contest {
     if (!action && req.method === 'GET') {
       return json(200, {
         contest: { name: c.name, type: c.type }, eventName: ev?.name || db.data.settings.event?.name || '',
-        ...this.signupState(c), review: !!sg.review, message: sg.message || '', consent: sg.consent || '', maxPhotos: SIGNUP_MAX_PHOTOS,
+        ...this.signupState(c), review: !!sg.review, message: sg.message || '', consent: sg.consent || '', maxPhotos: SIGNUP_MAX_PHOTOS, emails: this.emailOn,
         fields: fields.map(f => ({ ...f, ...(f.id === 'division' ? { type: 'choice', options: c.divisions || [] } : {}), ...(f.id === 'email' ? { type: 'email' } : {}),
           ...(['intro'].includes(f.id) ? { type: 'long' } : {}), ...(f.id === 'photos' ? { type: 'photos' } : {}) })).filter(f => f.id !== 'division' || (c.divisions || []).length),
       });
@@ -488,7 +489,24 @@ export class Contest {
       this.dirty.add('c:participants'); this.flags.rev = true;
       mine.push(now); hits.set(ip, mine);
       this.audit(null, 'participant.signup', { contestId: c.id, target: id, label: `${rec.title || rec.name} signed up${sg.review ? ' (waiting for review)' : ''}` });
-      return json(200, { ok: true, entry: id, token, number: rec.number, status: rec.status, heat: rec.heat || null });
+      let emailed = false;
+      const base = this.appBase(body.appBase);
+      if (rec.email && base) {
+        const { contest, event } = this.contestBits(c);
+        const link = `${base}signup/${key}/entry/${id}/${token}`;
+        const pending = rec.status === 'pending';
+        emailed = await this.mail(rec.email, pending ? `We got your sign-up: ${contest}` : `You're signed up: ${contest}`, message({
+          kicker: event || contest, title: pending ? 'Thanks! Your sign-up is waiting for review' : `You're signed up, ${rec.name || 'thanks'}!`, big: '#' + rec.number,
+          lines: [
+            `${rec.title || rec.character ? `${rec.title || rec.character} · ` : ''}${contest}${event ? ` at ${event}` : ''}`,
+            pending ? 'The organizers review every sign-up. We\'ll email you again when they do.' : 'Please check in when you arrive.',
+            rec.heat ? `You're in heat ${rec.heat}.` : '',
+          ].filter(Boolean),
+          button: { label: 'View or withdraw my entry', url: link },
+          after: ['Keep this email: the link above is private to you and is the only way to withdraw online.'],
+        }), 'Sign-up email');
+      }
+      return json(200, { ok: true, entry: id, token, number: rec.number, status: rec.status, heat: rec.heat || null, emailed });
     }
     if (action === 'photo' && req.method === 'POST') {
       const p = await this.signupEntry(c, url);
@@ -553,6 +571,39 @@ export class Contest {
     await this.save();
     return { token, user: this.publicUser(u), serverTime: Date.now() };
   }
+  // ---------- email
+  get emailOn() { return !!this.hooks.emailOn?.(); }
+  /** A link back into the app: only to an address this server already trusts (its own app site). */
+  appBase(base) { return this.hooks.appBase?.(base) || ''; }
+  async mail(to, subject, msg, what) {
+    if (!this.emailOn || !validEmail(to)) return false;
+    const r = await this.hooks.sendEmail({ to: String(to).trim(), subject, ...msg });
+    if (!r.ok) this.audit(null, 'email.failed', { label: `${what}: ${r.error}` });
+    return !!r.ok;
+  }
+  contestBits(c) {
+    const ev = c?.eventId ? this.db.data.events?.[c.eventId] : null;
+    return { contest: c?.name || 'the contest', event: ev && !ev.deleted ? ev.name || '' : '' };
+  }
+  /** Contestant emails after staff approve or decline a sign-up. Collected during a sync, sent after it. */
+  async drainMail() {
+    const q = this.mailQueue || []; this.mailQueue = [];
+    for (const { pid, kind } of q) {
+      const p = this.db.data.participants[pid], c = p && this.db.data.contests[p.contestId];
+      if (!p || !c || !p.email) continue;
+      const { contest, event } = this.contestBits(c);
+      const who = p.title || p.character || p.name || '';
+      if (kind === 'approved') {
+        await this.mail(p.email, `You're in: ${contest}`, message({ kicker: event || contest, title: `You're in, ${p.name || 'and welcome'}!`, big: p.number ? '#' + p.number : '',
+          lines: [`Your sign-up${who ? ` for ${who}` : ''} has been approved for ${contest}${event ? ` at ${event}` : ''}.`, p.heat ? `You're in heat ${p.heat}.` : '', 'Please check in when you arrive.'].filter(Boolean),
+          after: ['Need to drop out? Use the private link from your first email, or contact the organizers.'] }), 'Approval email');
+      } else if (kind === 'declined') {
+        await this.mail(p.email, `About your sign-up: ${contest}`, message({ kicker: event || contest, title: 'About your sign-up',
+          lines: [`Thanks for signing up${who ? ` with ${who}` : ''} for ${contest}${event ? ` at ${event}` : ''}. Unfortunately the organizers weren't able to accept this entry.`, 'If you have questions, please contact the organizers.'] }), 'Decline email');
+      }
+    }
+  }
+
   /** Every photo the data still points at. */
   photoIds() { return Object.values(this.db.data.participants).filter(p => !p.deleted).flatMap(p => p.photos || []); }
   stats() {
@@ -608,7 +659,7 @@ export class Contest {
   publicUser(u, onlyContests) {
     const contests = {};
     for (const [cid, r] of Object.entries(u.contests || {})) if (!onlyContests || onlyContests.includes(cid)) contests[cid] = r;
-    return { id: u.id, username: u.username, displayName: u.displayName, role: u.role, contests, active: u.active, mustChangePassword: !!u.mustChangePassword, rev: u.rev, ...(this.hooks.isPlatform?.(u) ? { platform: true } : {}) };
+    return { id: u.id, username: u.username, displayName: u.displayName, role: u.role, contests, active: u.active, mustChangePassword: !!u.mustChangePassword, rev: u.rev, ...(u.email ? { email: u.email } : {}), ...(this.hooks.isPlatform?.(u) ? { platform: true } : {}) };
   }
 
   /** What a user may see of a record. null = nothing at all. */
@@ -839,6 +890,9 @@ export class Contest {
       this.audit(user, rec.checkedIn ? 'participant.checkin' : 'participant.checkout', { contestId: cid, target: id, label: label(rec) });
     } else if (coll === 'participants' && patch.finalist !== undefined && !!patch.finalist !== !!(before && before.finalist)) {
       this.audit(user, rec.finalist ? 'participant.finalist' : 'participant.unfinalist', { contestId: cid, target: id, label: label(rec) });
+    } else if (coll === 'participants' && before?.status === 'pending' && ['registered', 'declined'].includes(rec.status) && rec.email && rec.source === 'signup') {
+      (this.mailQueue ||= []).push({ pid: id, kind: rec.status === 'declined' ? 'declined' : 'approved' });
+      this.audit(user, rec.status === 'declined' ? 'participant.decline' : 'participant.approve', { contestId: cid, target: id, label: label(rec) });
     } else if (coll === 'participants' && patch.deleted) {
       this.audit(user, 'participant.delete', { contestId: cid, target: id, label: label(rec) });
     } else if (coll === 'events') {
@@ -865,7 +919,8 @@ export class Contest {
       for (const u of Object.values(this.db.users)) {
         if (u.rev <= since) continue;
         if (isAdmin) out.push({ coll: 'users', rec: this.publicUser(u) });
-        else if (u.id === user.id || seeing.some(cid => (u.contests || {})[cid])) out.push({ coll: 'users', rec: this.publicUser(u, seeing) });
+        else if (u.id === user.id) out.push({ coll: 'users', rec: this.publicUser(u, seeing) });
+        else if (seeing.some(cid => (u.contests || {})[cid])) { const pu = this.publicUser(u, seeing); delete pu.email; out.push({ coll: 'users', rec: pu }); } // only admins see others' emails
       }
     }
     const led = this.ledContests(user);
@@ -998,6 +1053,50 @@ export class Contest {
       return json(200, { user: this.publicUser(u), serverTime: Date.now() });
     }
 
+    if (route === 'POST /api/account') {
+      // Your own details: just your email for now (for password resets).
+      const u = await this.requireUser(req);
+      const body = await readBody(req);
+      const e = String(body.email || '').trim();
+      if (e && !validEmail(e)) throw new HttpError(400, 'Please check the email address');
+      if (e) u.email = e; else delete u.email;
+      u.rev = this.bump(); this.dirty.add('users');
+      this.audit(u, 'user.update', { target: u.id, label: `${u.username}: email` });
+      return json(200, { ok: true, user: this.publicUser(u) });
+    }
+    if (route === 'POST /api/password/forgot') {
+      const body = await readBody(req, 10_000);
+      const who = String(body.who || '').trim().toLowerCase().slice(0, 200);
+      if (!this.emailOn) throw new HttpError(400, 'Password reset emails aren\'t set up on this server. Ask an admin to reset your password.');
+      if (this.throttled('fp:' + ip)) throw new HttpError(429, 'Too many attempts. Wait a minute and try again.');
+      this.noteFail('fp:' + ip);
+      const base = this.appBase(body.appBase);
+      const u = who && Object.values(db.users).find(x => x.active && !x.support && (x.username === who || (x.email || '').toLowerCase() === who));
+      if (u?.email && base) {
+        const token = randHex(24);
+        Object.assign(u, { resetHash: await sha256(token), resetExpires: Date.now() + 3600_000 });
+        this.dirty.add('users');
+        await this.mail(u.email, 'Reset your Spotlight password', message({ kicker: 'Spotlight', title: 'Reset your password',
+          lines: [`Someone asked to reset the password for ${u.displayName} (username ${u.username}). If it was you, use the button within the next hour.`],
+          button: { label: 'Choose a new password', url: `${base}reset/${token}` },
+          after: ['If you didn\'t ask for this, ignore this email. Your password stays the same.'] }), 'Password reset email');
+        this.audit(null, 'user.forgot', { target: u.id, label: u.username });
+      }
+      // Same answer either way, so this can't be used to find out who has an account.
+      return json(200, { ok: true });
+    }
+    if (route === 'POST /api/password/reset') {
+      const body = await readBody(req, 10_000);
+      const h = await sha256(String(body.token || ''));
+      const u = Object.values(db.users).find(x => x.resetHash && x.resetHash === h);
+      if (!u || !u.active || !(u.resetExpires > Date.now())) throw new HttpError(400, 'This reset link has expired or was already used. Ask for a new one.');
+      if (String(body.newPassword || '').length < 8) throw new HttpError(400, 'Password must be at least 8 characters');
+      Object.assign(u, await hashPassword(body.newPassword), { mustChangePassword: false, rev: this.bump() });
+      delete u.resetHash; delete u.resetExpires;
+      this.dropSessions(u.id); this.dirty.add('users');
+      this.audit(u, 'user.password', { target: u.id, label: 'by email reset' });
+      return json(200, { ok: true, username: u.username });
+    }
     if (route === 'POST /api/password') {
       const u = await this.requireUser(req);
       const { currentPassword, newPassword } = await readBody(req);
@@ -1020,8 +1119,9 @@ export class Contest {
       for (const ch of Array.isArray(body.changes) ? body.changes.slice(0, 2000) : []) {
         results.push({ key: ch && ch.key, coll: ch && ch.coll, id: ch && ch.id, ...this.applyChange(u, ch) });
       }
+      if (this.mailQueue?.length) await this.drainMail();
       const reset = since > db.rev;
-      return json(200, { rev: db.rev, schema: db.schema, reset, results, changes: this.pull(u, reset ? 0 : since), user: this.publicUser(u), serverTime: Date.now() });
+      return json(200, { rev: db.rev, schema: db.schema, reset, results, changes: this.pull(u, reset ? 0 : since), user: this.publicUser(u), serverTime: Date.now(), email: this.emailOn });
     }
 
     // ---- admin: accounts and access
@@ -1031,14 +1131,15 @@ export class Contest {
     }
     if (route === 'POST /api/users') {
       const admin = await this.requireUser(req, 'admin');
-      const { username, displayName, role, password, contests } = await readBody(req);
+      const { username, displayName, role, password, contests, email } = await readBody(req);
+      if (email && !validEmail(email)) throw new HttpError(400, 'Please check the email address');
       const uname = String(username || '').trim();
       if (!/^[a-zA-Z0-9._-]{2,40}$/.test(uname)) throw new HttpError(400, 'Username: 2–40 letters, numbers, . _ -');
       if (Object.values(db.users).some(x => x.username.toLowerCase() === uname.toLowerCase())) throw new HttpError(400, 'That username is taken');
       const grole = role === 'admin' ? 'admin' : 'member';
       if (String(password || '').length < 8) throw new HttpError(400, 'Password must be at least 8 characters');
       const id = newId();
-      db.users[id] = { id, username: uname, displayName: str(displayName || uname, 80), role: grole, contests: this.cleanContestRoles(contests), ...(await hashPassword(password)), active: true, mustChangePassword: true, createdAt: Date.now(), rev: this.bump() };
+      db.users[id] = { id, username: uname, displayName: str(displayName || uname, 80), role: grole, contests: this.cleanContestRoles(contests), ...(await hashPassword(password)), active: true, mustChangePassword: true, ...(email ? { email: String(email).trim() } : {}), createdAt: Date.now(), rev: this.bump() };
       this.dirty.add('users');
       this.audit(admin, 'user.create', { target: id, label: `${uname} (${grole}${Object.keys(db.users[id].contests).length ? ', ' + Object.entries(db.users[id].contests).map(([c, r]) => `${db.data.contests[c].name}: ${r}`).join(', ') : ''})` });
       return json(200, { user: this.publicUser(db.users[id]) });
@@ -1052,6 +1153,12 @@ export class Contest {
       const admins = Object.values(db.users).filter(x => x.role === 'admin' && x.active);
       const changes = [];
       if (body.displayName !== undefined) { u.displayName = str(body.displayName, 80) || u.username; changes.push('name'); }
+      if (body.email !== undefined) {
+        const e = String(body.email || '').trim();
+        if (e && !validEmail(e)) throw new HttpError(400, 'Please check the email address');
+        if (e) u.email = e; else delete u.email;
+        changes.push('email');
+      }
       if (body.role !== undefined) {
         const grole = body.role === 'admin' ? 'admin' : 'member';
         if (u.role === 'admin' && grole !== 'admin' && admins.length <= 1) throw new HttpError(400, 'Keep at least one active admin');

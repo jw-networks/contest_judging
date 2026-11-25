@@ -340,6 +340,7 @@ async function sync({ full = false } = {}) {
     const t1 = Date.now();
     S.clockOffset = res.serverTime - (t0 + t1) / 2;
     localStorage.setItem('cj-offset', String(Math.round(S.clockOffset)));
+    S.emailOn = !!res.email;
     const sent = new Set(batch.map(o => o.key));
     S.outbox = S.outbox.filter(o => !sent.has(o.key));
     let needFull = false;
@@ -558,7 +559,7 @@ function home() {
   return { admin: 'results', lead: 'results', viewer: 'results', coordinator: 'checkin', judge: 'judge', tech: 'tech', emcee: 'emcee' }[r] || 'none';
 }
 // Sign-up links keep their organization in the address (#/o/<code>/signup/…), so a refresh or bookmark stays on the right form.
-const route = () => { const [name, ...args] = location.hash.replace(/^#\/?/, '').replace(/^o\/[a-z0-9-]{1,30}\/(?=signup(\/|$))/i, '').split('/'); return { name: name || '', args }; };
+const route = () => { const [name, ...args] = location.hash.replace(/^#\/?/, '').replace(/^o\/[a-z0-9-]{1,30}\/(?=(signup|reset)(\/|$))/i, '').split('/'); return { name: name || '', args }; };
 
 window.addEventListener('hashchange', () => render());
 
@@ -586,11 +587,11 @@ let monitorActive = false;
 // #/o/<code>/<rest>: an organization's link. Remembers the code on this device (or, for a monitor, shows that
 // org's monitor without signing in), then continues to <rest>.
 function takeOrgLink() {
-  if (/^#\/signup(\/|$)/.test(location.hash) && !CFG.local) { ui.orgOverride = ''; return false; } // the main organization's form
+  if (/^#\/(signup|reset)(\/|$)/.test(location.hash) && !CFG.local) { ui.orgOverride = ''; return false; } // the main organization's form / reset page
   const m = location.hash.match(/^#\/o\/([a-z0-9-]{1,30})(?:\/(.*))?$/i);
   if (!m || CFG.local) return false;
   const code = m[1].toLowerCase(), rest = m[2] || '';
-  if (rest.startsWith('signup')) { ui.orgOverride = code; return false; }
+  if (rest.startsWith('signup') || rest.startsWith('reset')) { ui.orgOverride = code; return false; }
   if (rest.startsWith('monitor')) { ui.orgOverride = code; location.replace('#/' + rest); return true; }
   localStorage.setItem('cj-org', code);
   if (S.account && (S.account.org || '') !== code) { switchPerson(); return true; }
@@ -601,13 +602,14 @@ function takeOrgLink() {
 
 function render() {
   if (takeOrgLink()) return;
-  if (ui.orgOverride != null && !['monitor', 'signup'].includes(route().name)) { ui.orgOverride = null; connectEvents(); }
+  if (ui.orgOverride != null && !['monitor', 'signup', 'reset'].includes(route().name)) { ui.orgOverride = null; connectEvents(); }
   const app = $('#app');
   const r = route();
   if (r.name === 'monitor') { if (!monitorActive || (r.args[0] || null) !== mon.cid) renderMonitor(app); return; }
   monitorActive = false;
   // Public sign-up pages: no account needed. Drawn once per address so a background sync never wipes the form.
   if (r.name === 'signup') { if (signupShown !== location.hash) renderSignup(app, r.args); return; }
+  if (r.name === 'reset') { if (signupShown !== location.hash) renderReset(app, r.args[0]); return; }
   signupShown = null;
   if (!S.account) { renderLogin(app); return; }
   if (!r.name && !curId() && S.rev === 0) {
@@ -764,8 +766,16 @@ function forcePasswordChange() {
 function accountMenu() {
   const cur = h('input', { type: 'password', placeholder: 'Current password', autocomplete: 'current-password' });
   const nw = h('input', { type: 'password', placeholder: 'New password (8+ characters)', autocomplete: 'new-password' });
+  const em = h('input', { type: 'email', placeholder: 'you@example.com', value: S.account.user.email || '', autocomplete: 'email' });
   const close = openModal(S.account.user.displayName, h('div.stack',
     h('p.muted', `Signed in as ${S.account.username} · ${S.account.user.role}`),
+    S.account.support ? null : h('div.stack',
+      h('h3', 'Your email'),
+      h('p.small.muted', 'Only admins see it. Used to send you a link if you forget your password.'),
+      h('div.row.nowrap', em, h('button.btn', { onclick: async () => {
+        try { const r = await api('/api/account', { email: em.value.trim() }, { token: S.account.token }); S.account.user = r.user; await saveAccount(S.account); toast(em.value.trim() ? 'Email saved' : 'Email removed', 'ok'); }
+        catch (e) { toast(e.status ? e.message : 'You need to be online to change this', 'bad'); }
+      } }, 'Save'))),
     h('h3', 'Change password'), cur, nw,
     h('button.btn', {
       onclick: async () => {
@@ -813,7 +823,9 @@ async function renderLogin(app) {
     recent.length ? h('div', h('div.small.muted', { style: { marginBottom: '.4rem' } }, 'Used on this device'),
       h('div.recent', recent.map(a => h('button.chip', { type: 'button', title: a.org ? `${a.username} · ${a.org}` : a.username,
         onclick: () => { user.value = a.username; org.value = a.org || ''; pw.focus(); } }, a.user?.displayName || a.username, a.org && !CFG.local ? h('span.org-tag', a.org) : null)))) : null,
-    orgField, user, pw, err, btn, serverInfo),
+    orgField, user, pw, err, btn,
+    CFG.local ? null : h('div.small', { style: { textAlign: 'center' } }, h('a', { href: '#', onclick: e => { e.preventDefault(); forgotPassword(org, user); } }, 'Forgot your password?')),
+    serverInfo),
     h('p.small.muted', { style: { textAlign: 'center', marginTop: '1.5rem' } }, h('a', { href: monitorHref('') }, 'Open a confidence monitor (no sign-in needed)'))));
   setTimeout(() => { const a = document.activeElement; if (!a || a === document.body) user.focus(); }, 50); // never steal focus from a field already in use
 }
@@ -886,7 +898,7 @@ function viewCheckin() {
         h('div.l', `${l.reg}/${heatSize()} registered` + (walkUpSlots() ? ` · ${l.walk}/${walkUpSlots()} walk-up` : '')),
         h('div.bar', h('span', { style: { width: Math.min(100, l.total / l.cap * 100) + '%' } })));
     })) : null,
-    !readOnly && counts.pending && ui.ci.filter !== 'pending' ? h('div.banner.warn', h('span.tag', 'Sign-ups'), h('span.grow', `${counts.pending} online sign-up${counts.pending === 1 ? ' is' : 's are'} waiting for review.`),
+    !readOnly && counts.pending && ui.ci.filter !== 'pending' ? h('div.banner.warn', h('span.tag', 'Sign-ups'), h('span.grow', `${counts.pending} online sign-up${counts.pending === 1 ? ' is' : 's are'} waiting for review.${S.emailOn ? ' Approving or declining emails them.' : ''}`),
       h('button.btn.primary', { onclick: () => { ui.ci.filter = 'pending'; render(); } }, 'Review')) : null,
     readOnly ? h('div.banner.info', h('span.tag', 'View only'), `You can see this contest's ${W.many} and results, but not change anything.`) : null,
     h('div.panel.stack',
@@ -1845,6 +1857,10 @@ function describeAudit(a) {
     case 'score.submit': return h('span', h('b', a.username), ` submitted a score for ${pl}`);
     case 'participant.checkin': return h('span', h('b', a.username), ` checked in ${a.label}`);
     case 'participant.signup': return h('span', h('b', 'Online sign-up: '), a.label);
+    case 'participant.approve': return h('span', h('b', a.username), ` approved the sign-up for ${a.label}`);
+    case 'participant.decline': return h('span', h('b', a.username), ` declined the sign-up for ${a.label}`);
+    case 'email.failed': return h('span', h('b', { style: { color: 'var(--bad)' } }, 'Email not sent: '), a.label);
+    case 'user.forgot': return h('span', h('b', a.label), ' asked for a password reset email');
     case 'participant.withdraw': return h('span', h('b', 'Online: '), a.label);
     case 'participant.checkout': return h('span', h('b', a.username), ` undid check-in for ${a.label}`);
     case 'participant.delete': return h('span', h('b', a.username), ` deleted ${a.label}`);
@@ -2262,6 +2278,8 @@ function githubPanel(online) {
 // #/signup/<key>                         the contest's form (from the lead's link or QR code)
 // #/signup/<key>/entry/<entryId>/<token>  the contestant's own page: status, and withdraw
 let signupShown = null;
+// The app's own address for this organization, e.g. https://x.github.io/app/#/o/acme/ (the server only accepts its own site).
+const appBaseUrl = () => `${location.origin}${location.pathname}#/${orgCode() ? 'o/' + orgCode() + '/' : ''}`;
 const signupHref = (key, extra = '') => `${location.origin}${location.pathname}#/${orgCode() ? 'o/' + orgCode() + '/' : ''}signup/${key}${extra}`;
 function renderSignup(app, [key, sub, entryId, token]) {
   signupShown = location.hash;
@@ -2311,7 +2329,7 @@ function signupForm(body, head, key, info) {
       if (consent && !consent.checked) { err.textContent = 'Please tick the box to agree to the rules.'; return; }
       btn.disabled = true; btn.textContent = 'Sending…';
       try {
-        const r = await api('/api/signup/' + key, { values, consent: consent ? consent.checked : true, website: trap.value }, { timeout: 20000 });
+        const r = await api('/api/signup/' + key, { values, consent: consent ? consent.checked : true, website: trap.value, appBase: appBaseUrl() }, { timeout: 20000 });
         let sent = 0;
         for (const file of files) {
           btn.textContent = `Uploading photos… ${sent + 1} of ${files.length}`;
@@ -2339,7 +2357,8 @@ function signupDone(body, head, key, r, photoFails) {
     h('p', r.status === 'pending' ? 'Thanks! The organizers will review your sign-up. Your entry number is above.' : 'Thanks! Your entry number is above. Please check in when you arrive.'),
     r.heat ? h('p', `You're in heat ${r.heat}.`) : null,
     photoFails ? h('p.err', `${photoFails} photo${photoFails === 1 ? '' : 's'} didn't upload. You can bring them on the day.`) : null,
-    h('div.banner.warn', h('span.tag', 'Save this'), h('span.grow', 'This private link shows your entry and lets you withdraw. Bookmark it or copy it somewhere safe: it\'s the only copy.')),
+    r.emailed ? h('div.banner', h('span.tag', 'Emailed'), h('span.grow', 'We\'ve emailed you this private link. It shows your entry and lets you withdraw. Keep the email.'))
+      : h('div.banner.warn', h('span.tag', 'Save this'), h('span.grow', 'This private link shows your entry and lets you withdraw. Bookmark it or copy it somewhere safe: it\'s the only copy.')),
     h('div.local-addr', h('code', link), h('button.btn.sm.ghost', { onclick: () => navigator.clipboard?.writeText(link).then(() => toast('Copied', 'ok'), () => {}) }, 'Copy')),
     h('div.row', h('a.btn', { href: link }, 'Open my entry'), h('button.btn.ghost', { onclick: () => { signupShown = null; render(); } }, 'Sign up another entry'))));
 }
@@ -2363,6 +2382,48 @@ async function signupEntryPage(body, head, key, entryId, token) {
   };
   const load = () => api(`/api/signup/${key}/entry${q}`).then(draw).catch(e => body.replaceChildren(head, h('div.panel.stack', h('p', e.message))));
   load();
+}
+
+// #/reset/<token>  (from a password-reset email)
+function renderReset(app, token) {
+  signupShown = location.hash;
+  app.dataset.shell = '';
+  const pw = h('input', { type: 'password', autocomplete: 'new-password', placeholder: 'New password (8+ characters)' });
+  const pw2 = h('input', { type: 'password', autocomplete: 'new-password', placeholder: 'Type it again' });
+  const err = h('p.err'), btn = h('button.btn.primary.big', { type: 'submit' }, 'Set new password');
+  const body = h('form.panel.stack', { onsubmit: async e => {
+    e.preventDefault(); err.textContent = '';
+    if (pw.value.length < 8) { err.textContent = 'At least 8 characters, please.'; return; }
+    if (pw.value !== pw2.value) { err.textContent = 'The two passwords don\'t match.'; return; }
+    btn.disabled = true;
+    try {
+      const r = await api('/api/password/reset', { token, newPassword: pw.value });
+      const org = orgCode();
+      if (org) localStorage.setItem('cj-org', org);
+      body.replaceChildren(h('h2', 'Password changed'), h('p', `You can sign in now as ${r.username}.`), h('button.btn.primary', { type: 'button', onclick: async () => {
+        try { location.hash = '#/'; await login(r.username, pw.value, org); } catch (x) { toast(x.message, 'bad'); }
+      } }, 'Sign in'));
+    } catch (x) { err.textContent = x.message; btn.disabled = false; }
+  } }, h('h2', 'Choose a new password'), h('label.field', h('span', 'New password'), pw), h('label.field', h('span', 'Again'), pw2), err, btn);
+  app.replaceChildren(h('div.signup-page', h('div.logo', h('img', { src: 'icons/icon.svg', alt: '' }), h('span.kicker', APP_NAME)), body));
+}
+function forgotPassword(orgInput, userInput) {
+  const who = h('input', { type: 'text', autocapitalize: 'none', placeholder: 'Your username or email', value: userInput?.value || '' });
+  const err = h('p.err');
+  const close = openModal('Forgot your password?', h('div.stack',
+    h('p.small.muted', 'We\'ll email a link to choose a new password, if your account has an email address. No email on your account? Ask an admin to reset your password.'),
+    who, err),
+  [h('button.btn.primary', { onclick: async e => {
+    const org = CFG.local ? '' : String(orgInput?.value || '').trim().toLowerCase();
+    e.target.disabled = true; err.textContent = '';
+    try {
+      ui.orgOverride = org;
+      await api('/api/password/forgot', { who: who.value, appBase: `${location.origin}${location.pathname}#/${org ? 'o/' + org + '/' : ''}` });
+      close(); toast('If that account has an email address, a reset link is on its way. Check your inbox (and spam).', 'ok');
+    } catch (x) { err.textContent = x.message; e.target.disabled = false; }
+    finally { ui.orgOverride = null; }
+  } }, 'Email me a link')]);
+  setTimeout(() => who.focus(), 50);
 }
 
 // ============================================================ platform (Spotlight super-admin)
@@ -2400,11 +2461,12 @@ async function leaveSupport() {
 function viewPlatform() {
   const call = (path, body, method) => api('/api/platform' + path, body, { method, token: S.account.token, timeout: 30000 });
   const box = h('div.stack', h('div.panel.muted', S.net === 'online' ? 'Loading organizations…' : 'Connect to the internet to manage organizations.'));
-  const d = ui.newOrg ||= { name: '', code: '', codeEdited: false, admin: 'admin', event: '' };
-  const handover = (title, o, username, temp) => {
+  const d = ui.newOrg ||= { name: '', code: '', codeEdited: false, admin: 'admin', event: '', email: '' };
+  const handover = (title, o, username, temp, emailedTo = '') => {
     const text = `Spotlight sign-in for ${o.name}\nLink: ${orgLink(o)}\nOrganization code: ${o.code}\nUsername: ${username}\nTemporary password: ${temp}\n(You'll choose your own password when you sign in.)`;
     openModal(title, h('div.stack',
-      h('p.small.muted', 'Send these to the organization\'s admin. The temporary password is shown only now.'),
+      emailedTo ? h('div.banner', h('span.tag', 'Emailed'), h('span.grow', `We sent these to ${emailedTo}. Here they are too, in case it doesn't arrive.`))
+        : h('p.small.muted', 'Send these to the organization\'s admin. The temporary password is shown only now.'),
       h('pre.handover', text)), [h('button.btn', { onclick: () => navigator.clipboard?.writeText(text).then(() => toast('Copied', 'ok'), () => {}) }, 'Copy')]);
   };
   const backupCell = o => {
@@ -2442,12 +2504,13 @@ function viewPlatform() {
     const code = h('input', { type: 'text', placeholder: 'code', value: d.code, oninput: e => { e.target.value = slugCode(e.target.value); d.code = e.target.value; d.codeEdited = true; } });
     const admin = h('input', { type: 'text', placeholder: 'admin', value: d.admin, oninput: e => { d.admin = e.target.value.trim().toLowerCase(); } });
     const event = h('input', { type: 'text', placeholder: 'First event name (optional), e.g. Acme Con 2027', value: d.event, oninput: e => { d.event = e.target.value; } });
+    const aemail = h('input', { type: 'email', placeholder: 'Their email (optional): we send the sign-in', value: d.email, oninput: e => { d.email = e.target.value.trim(); } });
     const create = async () => {
       if (!d.name.trim() || !d.code) return toast('Give it a name and a code', 'bad');
       let r;
-      try { r = await call('/orgs', { name: d.name.trim(), code: d.code, adminUsername: d.admin || 'admin', eventName: d.event.trim() }); } catch (e) { return toast(e.message, 'bad'); }
+      try { r = await call('/orgs', { name: d.name.trim(), code: d.code, adminUsername: d.admin || 'admin', eventName: d.event.trim(), adminEmail: d.email, appBase: `${location.origin}${location.pathname}#/` }); } catch (e) { return toast(e.message, 'bad'); }
       ui.newOrg = null; load();
-      handover(`${r.org.name} is ready`, r.org, r.admin.username, r.admin.tempPassword);
+      handover(`${r.org.name} is ready`, r.org, r.admin.username, r.admin.tempPassword, r.admin.emailed ? r.admin.email : '');
     };
     box.replaceChildren(
       h('div.panel.stack', h('h3', 'Organizations'),
@@ -2479,14 +2542,22 @@ function viewPlatform() {
       h('div.panel.stack', h('h3', 'New organization'),
         h('p.small.muted', 'Each organization gets its own separate database, admin and events. Staff sign in with its code, or use its link.'),
         h('div.form-grid', h('label.field', h('span', 'Name'), name), h('label.field', h('span', 'Sign-in code'), code),
-          h('label.field', h('span', 'First admin username'), admin), h('label.field', h('span', 'First event'), event)),
+          h('label.field', h('span', 'First admin username'), admin), h('label.field', h('span', 'First admin\'s email'), aemail), h('label.field', h('span', 'First event'), event)),
         h('div', h('button.btn.primary', { onclick: create }, icon('plus'), 'Create organization'))));
   };
   const load = () => call('/orgs').then(r => draw(r.orgs)).catch(e => box.replaceChildren(h('div.banner.bad', h('span.tag', 'Error'), h('span.grow', e.message))));
-  if (S.net === 'online' || S.net === 'syncing') load();
+  const mailBox = h('div.panel.stack', h('h3', 'Email'), h('p.small.muted', 'Checking…'));
+  const loadMail = () => call('/email').then(m => {
+    const to = h('input', { type: 'email', placeholder: 'Send a test to…', value: S.account.user.email || '' });
+    mailBox.replaceChildren(h('h3', 'Email'),
+      m.on ? h('p.small', 'On. Emails come from ', h('b', m.from), m.replyTo ? ` (replies go to ${m.replyTo})` : '', '. Sign-up confirmations, approvals, password resets and new-organization welcomes are sent automatically.')
+        : h('p.small.muted', 'Off. To turn it on: make a free Resend account, verify your domain there, then add the RESEND_API_KEY secret and the EMAIL_FROM variable (e.g. Spotlight <noreply@yourdomain.com>) to the GitHub repo and redeploy the API. See the README.'),
+      m.on ? h('div.row.nowrap', to, h('button.btn', { onclick: async e => { e.target.disabled = true; try { await call('/email', { to: to.value.trim() }); toast('Test email sent', 'ok'); } catch (x) { toast(x.message, 'bad'); } e.target.disabled = false; } }, 'Send test')) : null);
+  }).catch(() => mailBox.remove());
+  if (S.net === 'online' || S.net === 'syncing') { load(); loadMail(); }
   return h('div.stack',
     h('div.panel', h('span.kicker', 'Spotlight platform'), h('p.small.muted', { style: { margin: '.3rem 0 0' } }, 'Only you see this. Organizations are your customers: each has its own data, admin, events and contests.')),
-    box);
+    box, mailBox);
 }
 
 // ============================================================ admin (account-wide)
@@ -2706,6 +2777,7 @@ function accountsPanel(online) {
     displayName: h('input', { type: 'text', placeholder: 'Display name', value: d.displayName || '', oninput: keep('displayName') }),
     username: h('input', { type: 'text', placeholder: 'username', autocapitalize: 'none', autocomplete: 'off', value: d.username || '', oninput: keep('username') }),
     password: h('input', { type: 'text', placeholder: 'Temporary password (8+, changed at first sign-in)', autocomplete: 'off', value: d.password || '', oninput: keep('password') }),
+    email: h('input', { type: 'email', placeholder: 'Email (optional, for password resets)', autocomplete: 'off', value: d.email || '', oninput: keep('email') }),
     kind: h('select', { onchange: keep('kind') }, h('option', { value: 'member', selected: d.kind !== 'admin' }, 'Member — access per contest'), h('option', { value: 'admin', selected: d.kind === 'admin' }, 'Admin — sees and manages everything')),
     cid: h('select', { onchange: keep('cid') }, h('option', { value: '' }, 'Add to contest… (optional)'), contests.filter(c => !c.archived).map(c => h('option', { value: c.id, selected: d.cid === c.id }, c.name))),
     crole: h('select', { onchange: keep('crole') }, ['judge', 'coordinator', 'lead', 'viewer', 'tech', 'emcee'].map(r => h('option', { value: r, selected: (d.crole || 'judge') === r }, 'as ' + r))),
@@ -2714,32 +2786,34 @@ function accountsPanel(online) {
     h('div.table-wrap', h('table.edit-table',
       h('thead', h('tr', h('th', 'Name'), h('th', 'Access'), h('th', ''))),
       h('tbody', users.map(u => h('tr', { style: { opacity: u.active ? 1 : .5 } },
-        h('td', h('div', u.displayName, u.active ? null : h('span.badge.no_show', { style: { marginLeft: '6px' } }, 'disabled')), h('div.small.muted', u.username)),
+        h('td', h('div', u.displayName, u.active ? null : h('span.badge.no_show', { style: { marginLeft: '6px' } }, 'disabled')), h('div.small.muted', u.username, u.email ? ` · ${u.email}` : '')),
         h('td', access(u).length ? access(u) : h('span.muted.small', 'no contests')),
         h('td', h('div.row', { style: { gap: '.3rem', flexWrap: 'nowrap', justifyContent: 'flex-end' } },
           h('button.btn.sm', { disabled: !online, onclick: () => editAccess(u, contests, call) }, 'Access'),
           h('button.btn.sm.ghost', { disabled: !online, onclick: () => { const pw = prompt(`Temporary password for ${u.displayName} (8+ characters). They'll be asked to change it when they sign in:`); if (pw) call(() => api('/api/users/' + u.id, { password: pw }, { method: 'PATCH', token: S.account.token }), 'Password reset'); } }, 'Reset password'),
           h('button.btn.sm.ghost', { disabled: !online || u.id === S.account.user.id, onclick: () => call(() => api('/api/users/' + u.id, { active: !u.active }, { method: 'PATCH', token: S.account.token }), u.active ? 'Account disabled' : 'Account enabled') }, u.active ? 'Disable' : 'Enable')))))))),
     h('h3', 'New account'),
-    h('div.form-grid', nu.displayName, nu.username, nu.password),
+    h('div.form-grid', nu.displayName, nu.username, nu.password, nu.email),
     h('div.form-grid', nu.kind, nu.cid, nu.crole),
     h('div', h('button.btn.primary', {
       disabled: !online,
       onclick: () => call(async () => {
         const contestsMap = nu.kind.value !== 'admin' && nu.cid.value ? { [nu.cid.value]: nu.crole.value } : {};
-        await api('/api/users', { username: nu.username.value.trim(), displayName: nu.displayName.value.trim(), password: nu.password.value, role: nu.kind.value, contests: contestsMap }, { token: S.account.token });
+        await api('/api/users', { username: nu.username.value.trim(), displayName: nu.displayName.value.trim(), password: nu.password.value, role: nu.kind.value, contests: contestsMap, email: nu.email.value.trim() }, { token: S.account.token });
         ui.newUser = { kind: nu.kind.value, cid: nu.cid.value, crole: nu.crole.value };
-        nu.username.value = nu.displayName.value = nu.password.value = '';
+        nu.username.value = nu.displayName.value = nu.password.value = nu.email.value = '';
       }, 'Account created'),
     }, icon('plus'), 'Create account')));
 }
 
 function editAccess(u, contests, call) {
   const admin = h('input', { type: 'checkbox', checked: u.role === 'admin', disabled: u.id === S.account.user.id });
+  const email = h('input', { type: 'email', value: u.email || '', placeholder: 'Email (optional, for password resets)' });
   const sel = {};
   const rows = contests.map(c => h('label.field', h('span', c.name + (c.archived ? ' (archived)' : '')),
     sel[c.id] = h('select', h('option', { value: '' }, 'No access'), ['lead', 'coordinator', 'judge', 'viewer', ...(c.type === 'makers' ? [] : ['tech', 'emcee'])].map(r => h('option', { value: r, selected: (u.contests || {})[c.id] === r }, r)))));
   const close = openModal(`Access · ${u.displayName}`, h('div.stack',
+    h('label.field', h('span', 'Email'), email),
     h('label.check', admin, 'Admin — sees and manages every contest and all accounts'),
     h('p.small.muted', 'Per-contest roles (ignored while Admin is ticked):'),
     contests.length ? h('div.form-grid', rows) : h('p.muted', 'No contests yet.')),
@@ -2749,7 +2823,7 @@ function editAccess(u, contests, call) {
       onclick: () => {
         const map = {}; for (const c of contests) map[c.id] = sel[c.id].value || null;
         close();
-        call(() => api('/api/users/' + u.id, { role: admin.checked ? 'admin' : 'member', contests: map }, { method: 'PATCH', token: S.account.token }), 'Access updated');
+        call(() => api('/api/users/' + u.id, { role: admin.checked ? 'admin' : 'member', contests: map, ...(email.value.trim() !== (u.email || '') ? { email: email.value.trim() } : {}) }, { method: 'PATCH', token: S.account.token }), 'Access updated');
       },
     }, 'Save access'),
   ]);

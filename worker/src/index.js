@@ -12,6 +12,7 @@
  * Secrets:  DATA_REPO_TOKEN (fine-grained token: Contents read/write on the data repo only), ADMIN_PASSWORD
  * Vars:     ALLOWED_ORIGINS, DATA_REPO, DATA_BRANCH, DATA_PATH, FLUSH_SECONDS
  */
+import { message, sendViaResend, validEmail } from './mail.js';
 import { Contest, HttpError, json } from './core.js';
 
 // ---------------------------------------------------------------- edge worker
@@ -87,6 +88,18 @@ export default {
   },
 };
 
+// ---------------------------------------------------------------- email
+const emailOn = env => !!(env.RESEND_API_KEY && env.EMAIL_FROM && !env.LOCAL_MODE);
+/** Links in emails point back at the app. Only accept the app's own site (ALLOWED_ORIGINS), e.g. https://x.github.io/app/#/o/acme/ */
+function appBase(env, base) {
+  try {
+    const u = new URL(String(base || ''));
+    const allowed = (env.ALLOWED_ORIGINS || '').split(',').map(x => x.trim()).filter(Boolean);
+    if (!allowed.includes(u.origin) || !/^#\/(o\/[a-z0-9-]{1,30}\/)?$/.test(u.hash) || u.search || u.username || u.password) return '';
+    return u.origin + u.pathname + u.hash;
+  } catch { return ''; }
+}
+
 // ---------------------------------------------------------------- platform (Spotlight's own super-admin)
 // Platform admins are admins of the default org whose usernames are listed in PLATFORM_ADMINS (default "admin").
 const ORG_CODE = /^[a-z0-9](?:[a-z0-9-]{0,28}[a-z0-9])?$/;
@@ -113,10 +126,23 @@ async function platform(req, env, url) {
     if (!/^[a-z0-9._-]{2,40}$/.test(adminUsername)) throw new HttpError(400, 'Admin username: 2–40 letters, numbers, dots, dashes or underscores');
     const { org } = await directory(env, '/create', { code, name, by: me.user.username });
     const tempPassword = randomPassword();
-    const r = await internalCall(env, org.id, '/api/internal/setup', { method: 'POST', body: { password: tempPassword, username: adminUsername, displayName: String(body.adminName || 'Administrator').slice(0, 80), eventName: String(body.eventName || '').slice(0, 120) } });
+    const adminEmail = String(body.adminEmail || '').trim();
+    if (adminEmail && !validEmail(adminEmail)) throw new HttpError(400, 'Please check the admin\'s email address');
+    const r = await internalCall(env, org.id, '/api/internal/setup', { method: 'POST', body: { password: tempPassword, username: adminUsername, displayName: String(body.adminName || 'Administrator').slice(0, 80), eventName: String(body.eventName || '').slice(0, 120), email: adminEmail } });
     if (!r.ok) throw new HttpError(500, 'Created the organization but could not set up its database: ' + ((await r.json().catch(() => ({}))).error || r.status));
     orgCache.clear();
-    return json(200, { org: { ...org, stats: await stats(org) }, admin: { username: adminUsername, tempPassword } });
+    // Send the first admin their sign-in details, if we can.
+    let emailed = false;
+    const base = appBase(env, body.appBase);
+    if (adminEmail && base && emailOn(env)) {
+      const link = base.replace(/#\/.*$/, `#/o/${code}`);
+      const sent = await sendViaResend(env, env.FETCH || ((...a) => fetch(...a)), { to: adminEmail, subject: `Your Spotlight sign-in for ${name}`, ...message({ kicker: 'Spotlight', title: `Welcome to Spotlight, ${name}`,
+        lines: ['Your organization is ready. Here is how to sign in the first time:', `Organization code: ${code}`, `Username: ${adminUsername}`, `Temporary password: ${tempPassword}`, 'You\'ll choose your own password when you sign in.'],
+        button: { label: 'Sign in', url: link },
+        after: ['Add your staff from the Admin page once you\'re in.' + (env.EMAIL_REPLY_TO ? ' If you get stuck, reply to this email.' : '')] }) });
+      emailed = sent.ok;
+    }
+    return json(200, { org: { ...org, stats: await stats(org) }, admin: { username: adminUsername, tempPassword, email: adminEmail, emailed } });
   }
   if (route === 'PATCH /api/platform/orgs/:id') {
     const patch = {};
@@ -147,6 +173,15 @@ async function platform(req, env, url) {
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new HttpError(r.status, d.error || 'Failed');
     return json(200, d);
+  }
+  if (route === 'GET /api/platform/email') return json(200, { on: emailOn(env), from: env.EMAIL_FROM || '', replyTo: env.EMAIL_REPLY_TO || '' });
+  if (route === 'POST /api/platform/email') {
+    const to = String(body.to || '').trim();
+    if (!validEmail(to)) throw new HttpError(400, 'Please check the email address');
+    if (!emailOn(env)) throw new HttpError(400, 'Email is not set up: add RESEND_API_KEY (secret) and EMAIL_FROM to the Worker');
+    const r = await sendViaResend(env, env.FETCH || ((...a) => fetch(...a)), { to, subject: 'Spotlight test email', ...message({ kicker: 'Spotlight', title: 'Email works', lines: ['This is a test from your Spotlight platform screen. Sign-up confirmations, approvals and password resets will look like this.'] }) });
+    if (!r.ok) throw new HttpError(502, r.error);
+    return json(200, { ok: true });
   }
   if (route === 'POST /api/platform/orgs/:id/reset') {
     const { orgs } = await directory(env, '/list');
@@ -327,6 +362,9 @@ export class ContestDB {
     this.contest = new Contest(this.storeAdapter(), {
       broadcast: (t, d) => this.broadcast(t, d), local: !!env.LOCAL_MODE,
       missingPhoto: id => this.photoFromBackup(id),
+      emailOn: () => emailOn(env),
+      sendEmail: m => sendViaResend(env, env.FETCH || ((...a) => fetch(...a)), m),
+      appBase: base => appBase(env, base),
       isPlatform: u => !!env.DIRECTORY && this.orgId === DEFAULT_ORG && u.role === 'admin' && u.active !== false && platformAdmins.includes(u.username),
     });
     this.initError = null;
@@ -467,7 +505,7 @@ export class ContestDB {
       try {
         await this.ctx.storage.put('orgId', orgId);
         this.setOrg(orgId);
-        await this.contest.seed(body.password, { username: body.username || 'admin', displayName: body.displayName || 'Administrator', eventName: body.eventName || '' });
+        await this.contest.seed(body.password, { username: body.username || 'admin', displayName: body.displayName || 'Administrator', eventName: body.eventName || '', email: body.email || '' });
         this.fresh = false;
         await this.scheduleFlush(5000);
         return json(200, { ok: true });

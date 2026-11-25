@@ -55,6 +55,16 @@ const ghLog = [];
 async function fakeGitHub(url, init = {}) {
   const u = new URL(url);
   const respond = (status, body, raw = false) => new Response(raw ? body : JSON.stringify(body), { status });
+  if (u.hostname === 'api.resend.com') {
+    // Fake Resend: emails land in dev/.data/emails.json (newest last), and nothing is sent.
+    const f = path.join(DATA, 'emails.json');
+    const list = fs.existsSync(f) ? JSON.parse(fs.readFileSync(f, 'utf8')) : [];
+    const m = JSON.parse(init.body);
+    if (process.env.FAKE_EMAIL_DOWN) return respond(500, { name: 'application_error', message: 'Resend is down' });
+    list.push({ at: Date.now(), from: m.from, to: m.to, subject: m.subject, html: m.html, text: m.text, reply_to: m.reply_to });
+    fs.writeFileSync(f, JSON.stringify(list, null, 1));
+    return respond(200, { id: 'dev-' + list.length });
+  }
   if (process.env.FAKE_GITHUB_DOWN) return respond(503, { message: 'unavailable' });
   if (/^\/repos\/[^/]+\/[^/]+$/.test(u.pathname)) return respond(200, { private: true });
   const m = u.pathname.match(/^\/repos\/[^/]+\/[^/]+\/contents\/(.+)$/);
@@ -90,6 +100,8 @@ const env = {
   PLATFORM_ADMINS: process.env.PLATFORM_ADMINS || 'admin',
   DEFAULT_ORG_CODE: process.env.DEFAULT_ORG_CODE || 'main',
   FETCH: fakeGitHub,
+  // Email is on in development (fake Resend above). DEV_EMAIL=0 turns it off.
+  ...(process.env.DEV_EMAIL === '0' ? {} : { RESEND_API_KEY: 'dev-key', EMAIL_FROM: 'Spotlight <noreply@example.com>' }),
 };
 env.CONTEST = { idFromName: n => n, get: n => durable(n, ContestDB).obj };
 env.DIRECTORY = { idFromName: n => n, get: n => durable('dir:' + n, Directory).obj };

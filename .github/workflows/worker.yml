@@ -44,3 +44,19 @@ jobs:
         env:
           DATA_REPO_TOKEN: ${{ secrets.DATA_REPO_TOKEN }}
           ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+
+      # Email is optional: add the RESEND_API_KEY secret and the EMAIL_FROM variable (see README) to turn it on.
+      - name: Email settings (optional)
+        working-directory: worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+          EMAIL_FROM: ${{ vars.EMAIL_FROM }}
+          EMAIL_REPLY_TO: ${{ vars.EMAIL_REPLY_TO }}
+        run: |
+          if [ -z "$RESEND_API_KEY" ]; then echo "Email is off (no RESEND_API_KEY secret)."; exit 0; fi
+          if [ -z "$EMAIL_FROM" ]; then echo "::warning::RESEND_API_KEY is set but the EMAIL_FROM repository variable isn't, so email stays off."; exit 0; fi
+          printf '%s' "$RESEND_API_KEY" | npx --yes wrangler@3 secret put RESEND_API_KEY
+          printf '%s' "$EMAIL_FROM" | npx --yes wrangler@3 secret put EMAIL_FROM
+          if [ -n "$EMAIL_REPLY_TO" ]; then printf '%s' "$EMAIL_REPLY_TO" | npx --yes wrangler@3 secret put EMAIL_REPLY_TO; fi
