@@ -100,6 +100,7 @@ body = '''
   <ul>
     <li>The <b>Tech booth</b> sees who's on and their music and lighting cues.</li>
     <li>The <b>Emcee</b> sees who's on and who's next, with pronunciation and intro notes.</li>
+    <li>If a tech or emcee device goes offline, it shows <b>Next contestant</b> and <b>Back</b> buttons, and they can tap any name in the running order. That only changes their own screen, never the real stage, and the device goes back to the live stage as soon as it reconnects.</li>
     <li>The <b>confidence monitor</b> is a full-screen view for a screen backstage or by the stage. Open it from the monitor button in the top bar. It needs no sign-in.</li>
   </ul>
 </section>

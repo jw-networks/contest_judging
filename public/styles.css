@@ -701,3 +701,6 @@ pre.handover { margin: 0; padding: 12px; white-space: pre-wrap; font: 600 14px/1
 .inbox-msg { margin: 0; white-space: pre-wrap; background: var(--field); padding: 8px 10px; border-left: 3px solid var(--cyan); }
 
 .badge.waitlisted { background: #33284f; color: #cdb8ff; }
+
+.show-step { margin-top: 14px; flex-wrap: wrap; }
+.show-step .btn.primary { min-height: 54px; font-size: 18px; }

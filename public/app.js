@@ -391,7 +391,7 @@ function setNet(n) {
   const wasOnline = S.net === 'online';
   S.net = n;
   renderSync();
-  if (wasOnline !== (n === 'online') && ['setup', 'judge', 'admin', ''].includes(route().name)) scheduleRender(); // online-only buttons, offline banner, first-load message
+  if (wasOnline !== (n === 'online') && ['setup', 'judge', 'admin', 'tech', 'emcee', ''].includes(route().name)) scheduleRender(); // online-only buttons, offline banner, first-load message
 }
 
 // Live connection to the API (WebSocket): instant nudges when anything changes, and the stage timer.
@@ -1254,15 +1254,29 @@ function goFullscreen() {
 }
 async function requestWakeLock() { try { await navigator.wakeLock?.request('screen'); } catch { /* not supported */ } }
 
-// ============================================================ tech booth & emcee (read-only, follow the live stage)
+// ============================================================ tech booth & emcee (follow the live stage)
+// Offline, the crew can step through the running order on their own device (never the real stage).
+// ui.showLocal = { cid, round, pid, at }: who this device shows as on stage, and since when. Cleared on reconnect.
 function viewShow(kind) {
   const isTech = kind === 'tech';
-  const s = stage();
+  const offline = S.net === 'offline' || S.net === 'auth';
+  if (!offline && ui.showLocal) { ui.showLocal = null; toast('Back online: showing the live stage again', 'ok'); }
+  if (ui.showLocal && (ui.showLocal.cid !== curId() || ui.showLocal.round !== stageRound())) ui.showLocal = null;
+  const live = stage();
+  const order = roundList(stageRound()).filter(p => p.status !== 'no_show');
+  const local = ui.showLocal;
+  const idxOf = pid => order.findIndex(p => p.id === pid);
+  // What this screen shows: the live stage, or this device's own place in the running order while offline.
+  const s = local ? { ...live, participantId: local.pid, nextParticipantId: order[idxOf(local.pid) + 1]?.id || null, state: local.pid ? 'running' : 'idle', startedAt: local.at, durationMs: settings().stageSeconds * 1000, remainingMs: null } : live;
   const cur = S.data.participants[s.participantId];
   const nxt = S.data.participants[s.nextParticipantId];
-  const order = roundList(stageRound()).filter(p => p.status !== 'no_show');
-  const upcoming = order.filter(p => p.status !== 'done' && p.id !== s.participantId);
-  const offline = S.net === 'offline' || S.net === 'auth';
+  const upcoming = local ? order.slice(idxOf(local.pid) + 1) : order.filter(p => p.status !== 'done' && p.id !== s.participantId);
+  const moveTo = pid => { ui.showLocal = { cid: curId(), round: stageRound(), pid, at: Date.now() }; render(); };
+  const step = d => {
+    const i = idxOf(s.participantId);
+    const to = i < 0 ? (d > 0 ? order.find(p => p.status !== 'done') || order[0] : null) : order[i + d];
+    if (to) moveTo(to.id);
+  };
   const fld = (label, val, cls = '') => h('div.show-field', { class: cls }, h('span.kicker', label), h('div.v', val || h('span.muted', '—')));
   const details = (p, big) => !p ? null : isTech
     ? h('div.show-fields', fld('Music & sound', p.music, big ? 'big' : ''), fld('Lighting', p.lighting, big ? 'big' : ''))
@@ -1272,32 +1286,40 @@ function viewShow(kind) {
   if (isTech) {
     const warnMs = settings().warnSeconds * 1000;
     const tick = () => {
-      const st = stage(); const rem = remainingOf(st);
+      const st = ui.showLocal ? s : stage();
+      const rem = ui.showLocal ? st.durationMs - (Date.now() - st.startedAt) : remainingOf(st);
       clock.textContent = st.participantId ? fmtClock(rem) : '';
       clock.className = 'stage-clock show-clock ' + (rem <= 0 && !['ready', 'idle'].includes(st.state) ? 'over' : rem <= warnMs && st.state !== 'idle' ? 'warn' : '');
     };
     tick(); ticker = setInterval(tick, 250);
   }
-  stateLbl.textContent = { idle: 'Stage empty', ready: 'Standing by', running: 'Live', paused: 'Paused', finished: 'Finished' }[s.state] || '';
+  stateLbl.textContent = local ? 'On this device' : { idle: 'Stage empty', ready: 'Standing by', running: 'Live', paused: 'Paused', finished: 'Finished' }[s.state] || '';
+  const i = idxOf(s.participantId);
   return h('div.stack',
-    offline ? h('div.banner.warn', h('span.tag', 'Offline'), h('span.grow', 'Showing the last stage update this device received. It catches up as soon as it reconnects.')) : null,
+    offline ? h('div.banner.warn', h('span.tag', 'Offline'), h('span.grow', local
+      ? 'You\'re moving through the running order on this device only. The real stage isn\'t changed. When this device reconnects, it goes back to the live stage.'
+      : 'Showing the last stage update this device received. If the stage moves on, use Next contestant to keep up. It catches up as soon as it reconnects.')) : null,
     h('div.grid.cols-show',
       h('div.panel.accent.show-now',
         h('div.row.between', h('span.kicker', 'On stage now'), stateLbl),
         cur ? h('div', h('h2.show-name', partLabel(cur)), h('div.muted', partSub(cur))) : h('h2.show-name.muted', 'Nobody on stage'),
         isTech ? clock : null,
-        details(cur, true)),
+        details(cur, true),
+        offline ? h('div.row.show-step',
+          h('button.btn', { disabled: i <= 0, onclick: () => step(-1) }, 'Back'),
+          h('button.btn.primary.grow', { disabled: i >= order.length - 1 && i >= 0, onclick: () => step(1) }, cur ? 'Next contestant' : 'Start with the first contestant'),
+          local ? h('button.btn.ghost', { onclick: () => { ui.showLocal = null; render(); }, title: 'Show the last update from the server again' }, 'Last live update') : null) : null),
       h('div.panel.show-next',
         h('span.kicker', 'Up next'),
         nxt ? h('div', h('h3.show-next-name', partLabel(nxt)), h('div.small.muted', partSub(nxt))) : h('p.muted', '—'),
         details(nxt, false))),
     h('div.panel', h('h3', 'Running order'),
-      upcoming.length ? h('div.list', upcoming.map(p => h('div.item', { style: { cursor: 'default' }, class: p.id === s.nextParticipantId ? 'sel' : '' },
+      upcoming.length ? h('div.list', upcoming.map(p => h('div.item', { style: { cursor: offline ? 'pointer' : 'default' }, class: p.id === s.nextParticipantId ? 'sel' : '', title: offline ? 'Show them as on stage on this device' : null, onclick: offline ? () => moveTo(p.id) : null },
         h('div.num', p.number || '–'),
         h('div.who', h('div.n', p.name), h('div.c', isTech ? [p.music, p.lighting].filter(Boolean).join(' · ') || 'No cues entered' : (p.pronunciation ? 'Say: ' + p.pronunciation : p.character || ''))),
         p.id === s.nextParticipantId ? h('span.badge.next', 'next') : null)))
         : h('p.muted', 'Nobody left in the running order.')),
-    h('p.small.muted', isTech ? 'Cues are entered by coordinators at check-in. This screen updates on its own as the stage moves.' : 'Intros and pronunciations are entered by coordinators at check-in. This screen updates on its own as the stage moves.'));
+    h('p.small.muted', (isTech ? 'Cues are entered by coordinators at check-in.' : 'Intros and pronunciations are entered by coordinators at check-in.') + (offline ? ' While offline, tap a name to show them as on stage on this device.' : ' This screen updates on its own as the stage moves.')));
 }
 
 // ============================================================ reference photos
