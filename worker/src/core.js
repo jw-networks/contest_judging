@@ -515,7 +515,8 @@ export class Contest {
       // At most 8 sign-ups per network address per hour (shared phones at a desk are fine; floods are not).
       const hits = (this.signupHits ||= new Map());
       const now = Date.now(), mine = (hits.get(ip) || []).filter(t => now - t < 3600_000);
-      if (mine.length >= 8) throw new HttpError(429, 'Too many sign-ups from this network. Please try again later, or ask the organizers.');
+      // High enough for a busy sign-up table on the venue's shared connection; the trap field stops simple bots.
+      if (mine.length >= 60) throw new HttpError(429, 'Too many sign-ups from this network. Please try again later, or ask the organizers.');
       const st = this.signupState(c);
       if (!st.open) throw new HttpError(409, st.reason);
       const v = body.values && typeof body.values === 'object' ? body.values : {};
@@ -1173,7 +1174,9 @@ ${r.comments.length ? `<p style="margin:0 0 6px;font-size:13px;font-weight:700;l
       const u = Object.values(db.users).find(x => x.username.toLowerCase() === uname);
       const ok = await verifyPassword(String(password || ''), u);
       if (!ok || !u.active) {
-        this.noteFail('ip:' + ip); this.noteFail('u:' + uname);
+        // Everyone at a venue shares one connection, so a wrong password slows down only that username.
+        // The per-connection limit is a high backstop against guessing across many accounts.
+        this.noteFail('ip:' + ip, 40); this.noteFail('u:' + uname);
         throw new HttpError(401, 'Wrong username or password');
       }
       this.loginFails.delete('ip:' + ip); this.loginFails.delete('u:' + uname);
@@ -1290,8 +1293,8 @@ ${r.comments.length ? `<p style="margin:0 0 6px;font-size:13px;font-weight:700;l
       const body = await readBody(req, 10_000);
       const who = String(body.who || '').trim().toLowerCase().slice(0, 200);
       if (!this.emailOn) throw new HttpError(400, 'Password reset emails aren\'t set up on this server. Ask an admin to reset your password.');
-      if (this.throttled('fp:' + ip)) throw new HttpError(429, 'Too many attempts. Wait a minute and try again.');
-      this.noteFail('fp:' + ip);
+      if (this.throttled('fp:' + ip) || this.throttled('fpu:' + who)) throw new HttpError(429, 'Too many attempts. Wait a minute and try again.');
+      this.noteFail('fp:' + ip, 20); this.noteFail('fpu:' + who, 3);
       const base = this.appBase(body.appBase);
       const u = who && Object.values(db.users).find(x => x.active && !x.support && (x.username === who || (x.email || '').toLowerCase() === who));
       if (u?.email && base) {
