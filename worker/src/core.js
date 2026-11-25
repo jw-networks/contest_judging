@@ -526,7 +526,8 @@ export class Contest {
     if (action === 'entry' && req.method === 'GET') {
       const p = await this.signupEntry(c, url);
       return json(200, { contest: c.name, eventName: ev?.name || '', number: p.number, name: p.name || '', character: p.character || '', title: p.title || '',
-        status: p.status, heat: (c.heats || 0) > 0 ? p.heat || null : null, photos: (p.photos || []).length, signupAt: p.signupAt });
+        status: p.status, heat: (c.heats || 0) > 0 ? p.heat || null : null, photos: (p.photos || []).length, signupAt: p.signupAt,
+        ...(c.feedback?.released ? { feedback: this.feedbackFor(p, { comments: c.feedback.comments !== false }), heats: (c.heats || 0) > 0 } : {}) });
     }
     if (action === 'withdraw' && req.method === 'POST') {
       const body = await readBody(req, 5000);
@@ -602,6 +603,54 @@ export class Contest {
           lines: [`Thanks for signing up${who ? ` with ${who}` : ''} for ${contest}${event ? ` at ${event}` : ''}. Unfortunately the organizers weren't able to accept this entry.`, 'If you have questions, please contact the organizers.'] }), 'Decline email');
       }
     }
+  }
+
+  // ---------- contestant feedback (never says which judge gave what)
+  /** For one entry: per round, the average total, average per category, quick notes (most-ticked first) and, optionally, comments. */
+  feedbackFor(p, { comments = true } = {}) {
+    const c = this.db.data.contests[p.contestId];
+    const crits = Object.values(this.db.data.criteria).filter(x => x.contestId === p.contestId && !x.deleted).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    const order = c?.quickNotes || [];
+    const rounds = [];
+    for (const round of [null, 'final']) {
+      const scs = Object.values(this.db.data.scores).filter(s => s.participantId === p.id && !s.deleted && s.submitted && (s.round === 'final' ? 'final' : null) === round
+        && crits.some(k => s.values?.[k.id] != null));
+      if (!scs.length) continue;
+      const total = s => crits.reduce((t, k) => t + (s.values?.[k.id] ?? 0) * (k.weight ?? 1), 0);
+      const avg = xs => xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null;
+      const tally = new Map();
+      for (const s of scs) for (const t of s.tags || []) tally.set(t, (tally.get(t) || 0) + 1);
+      rounds.push({
+        round: round || 'main',
+        total: avg(scs.map(total)), max: crits.reduce((t, k) => t + k.max * (k.weight ?? 1), 0),
+        categories: crits.map(k => ({ name: k.name, avg: avg(scs.map(s => s.values?.[k.id]).filter(v => v != null)), max: k.max })),
+        notes: [...tally.entries()].sort((a, b) => b[1] - a[1] || (order.indexOf(a[0]) + 1 || 999) - (order.indexOf(b[0]) + 1 || 999) || a[0].localeCompare(b[0])).map(([t]) => t),
+        // Alphabetical, so the order says nothing about who wrote what.
+        comments: comments ? scs.map(s => String(s.comment || '').trim()).filter(Boolean).sort((a, b) => a.localeCompare(b)) : [],
+      });
+    }
+    return rounds;
+  }
+  feedbackMessage(p) {
+    const c = this.db.data.contests[p.contestId];
+    const { contest, event } = this.contestBits(c);
+    const rounds = this.feedbackFor(p, { comments: c?.feedback?.comments !== false });
+    const esc = x => String(x ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+    const f1 = n => n == null ? '–' : (Math.round(n * 10) / 10).toString();
+    const heats = (c?.heats || 0) > 0;
+    let html = '', text = '';
+    for (const r of rounds) {
+      const head = heats ? (r.round === 'final' ? 'Finals' : 'Heats') : '';
+      html += `${head ? `<h2 style="font-size:18px;margin:22px 0 8px;color:#111">${head}</h2>` : ''}
+<p style="margin:0 0 12px;font-size:16px;color:#1b1f24"><b>Average score: ${f1(r.total)}</b> out of ${f1(r.max)}</p>
+<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;margin:0 0 14px">${r.categories.map(k => `<tr><td style="padding:6px 0;border-bottom:1px solid #e6e9ec;font-size:15px;color:#1b1f24">${esc(k.name)}</td><td style="padding:6px 0;border-bottom:1px solid #e6e9ec;font-size:15px;text-align:right;color:#1b1f24"><b>${f1(k.avg)}</b> / ${k.max}</td></tr>`).join('')}</table>
+${r.notes.length ? `<p style="margin:0 0 6px;font-size:13px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#0f8a9b">What the judges noticed</p><p style="margin:0 0 14px">${r.notes.map(t => `<span style="display:inline-block;margin:0 6px 6px 0;padding:5px 10px;background:#e3f6f8;color:#0b5f6b;font-size:14px">${esc(t)}</span>`).join('')}</p>` : ''}
+${r.comments.length ? `<p style="margin:0 0 6px;font-size:13px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#0f8a9b">Judges' comments</p>${r.comments.map(t => `<p style="margin:0 0 10px;padding:8px 12px;border-left:3px solid #18b4c9;background:#f6f8f9;font-size:15px;line-height:1.5;color:#1b1f24;white-space:pre-wrap">${esc(t)}</p>`).join('')}` : ''}`;
+      text += `${head ? `\n${head}\n` : ''}Average score: ${f1(r.total)} out of ${f1(r.max)}\n${r.categories.map(k => `  ${k.name}: ${f1(k.avg)} / ${k.max}`).join('\n')}\n${r.notes.length ? `What the judges noticed: ${r.notes.join(', ')}\n` : ''}${r.comments.length ? `Judges' comments:\n${r.comments.map(t => '  - ' + t).join('\n')}\n` : ''}`;
+    }
+    return { rounds, contest, event, msg: message({ kicker: event || contest, title: `Your judges' feedback`, big: p.number ? '#' + p.number : '',
+      lines: [`${p.title || p.character || p.name || ''}${p.title || p.character ? ' · ' : ''}${contest}${event ? ` at ${event}` : ''}`, 'Thank you for entering! Here is how the judges scored you. Scores are averaged across all judges.'],
+      block: { html, text }, after: ['Congratulations on your entry, and we hope to see you next time.'] }) };
   }
 
   /** Every photo the data still points at. */
@@ -730,6 +779,8 @@ export class Contest {
         if (has('walkUps')) p.walkUps = Math.round(num(patch.walkUps, 0, 100, 4));
         if (has('order')) p.order = num(patch.order, -1e6, 1e6, 0);
         if (has('archived')) p.archived = !!patch.archived;
+        // Contestant feedback: released = shown on their private entry page; comments = include judges' written comments.
+        if (has('feedback') && patch.feedback && typeof patch.feedback === 'object') p.feedback = { released: !!patch.feedback.released, comments: patch.feedback.comments !== false };
         break;
       case 'criteria':
         if (has('contestId')) p.contestId = str(patch.contestId, 64);
@@ -1053,6 +1104,30 @@ export class Contest {
       return json(200, { user: this.publicUser(u), serverTime: Date.now() });
     }
 
+    if (route === 'POST /api/feedback/email') {
+      // Leads and admins: email feedback to contestants who left an email. In batches (the app calls until done),
+      // because each email is one outgoing request and Cloudflare limits those per request.
+      const u = await this.requireUser(req);
+      const body = await readBody(req, 50_000);
+      const c = db.data.contests[String(body.contestId || '')];
+      if (!c || c.deleted) throw new HttpError(404, 'No such contest');
+      if (!this.manages(u, c.id)) throw new HttpError(403, 'Only the contest lead or an admin can send feedback');
+      if (!this.emailOn) throw new HttpError(400, 'Email isn\'t set up on this server');
+      const ids = Array.isArray(body.ids) ? new Set(body.ids.map(String)) : null;
+      const todo = Object.values(db.data.participants).filter(p => p.contestId === c.id && !p.deleted && validEmail(p.email) && !OUT_STATUSES.includes(p.status) && p.status !== 'pending'
+        && (!ids || ids.has(p.id)) && (body.again || !p.feedbackSentAt) && this.feedbackFor(p, { comments: false }).length);
+      const batch = todo.slice(0, 20);
+      let sent = 0, failed = 0;
+      for (const p of batch) {
+        const { msg, contest } = this.feedbackMessage(p);
+        if (await this.mail(p.email, `Your feedback: ${contest}`, msg, 'Feedback email')) {
+          Object.assign(p, { feedbackSentAt: Date.now(), rev: this.bump() }); sent++;
+        } else failed++;
+      }
+      if (sent) { this.dirty.add('c:participants'); this.flags.rev = true; }
+      if (sent || failed) this.audit(u, 'feedback.email', { contestId: c.id, label: `${sent} sent${failed ? `, ${failed} failed` : ''}` });
+      return json(200, { sent, failed, remaining: failed ? 0 : todo.length - batch.length });
+    }
     if (route === 'POST /api/account') {
       // Your own details: just your email for now (for password resets).
       const u = await this.requireUser(req);

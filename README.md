@@ -168,6 +168,25 @@ Each contest can have its own sign-up form. Contest leads and admins turn it on 
 - **Organizations:** links for other organizations include the org code (`#/o/<code>/signup/…`), so entries always land in the right organization. Sign-ups also work on the local network server.
 - **Export:** "Download sign-ups (CSV)" lists everyone who signed up online, with their answers.
 
+## Contestant feedback
+
+**Results → Contestant feedback** (contest leads and admins). For each contestant: their average score, their average for each category, the quick notes the judges ticked (most-ticked first) and, if you allow it, the judges' written comments. It never says which judge gave what: no names, and comments are listed alphabetically, not in judge order. Only submitted score sheets count. With heats, heats and finals are shown separately.
+
+- **Print feedback sheets:** one page per contestant. Each contestant's Review page also has **Print feedback** for just them.
+- **Email feedback** (when email is on): goes to every scored contestant with an email address, each getting only their own. It's sent in batches and never twice, unless you choose **Send again to everyone**.
+- **Show feedback on contestants' private sign-up pages:** contestants who signed up online see it on their private entry page.
+- **Include the judges' written comments:** on by default. Turn it off to share only scores and quick notes.
+
+## Paper score cards
+
+A backup for when tablets can't be used: **Setup → Judging criteria → Print paper score cards**, or **Results → Paper score cards**.
+
+- **Cards:** one per contestant, two per page (one per page if there are many criteria or quick notes). Each has a box per criterion with its maximum, a total box, quick-note tick boxes and comment lines.
+- **Judge sheet:** one landscape table per judge, a row per contestant in running order.
+- Print for everyone, one heat, finals, or blank cards only. Add blank extras for walk-ups, print only people who have checked in, and print a named copy for each judge.
+
+Type the scores in later from each contestant's Review page.
+
 ## Heats and finals
 
 In **Setup → Contest**, set **Heats** (0 = no heats) and **Finalists from all heats combined** (default 3).

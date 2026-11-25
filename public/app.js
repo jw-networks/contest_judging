@@ -1665,6 +1665,7 @@ function viewResults() {
         h('label.check', h('input', { type: 'checkbox', checked: ui.includeDrafts, onchange: e => { ui.includeDrafts = e.target.checked; render(); } }), 'Include unsubmitted drafts')),
       h('div.row',
         h('button.btn', { onclick: () => window.print() }, 'Print'),
+        canEdit ? h('button.btn', { onclick: paperCardsModal }, 'Paper score cards') : null,
         h('button.btn', { onclick: () => exportResults(crits) }, 'Export CSV'))),
     best && !final ? h('div.panel.accent', h('span.kicker', heatsOn() ? 'Highest heat score' : 'Highest overall score'), h('h2', { style: { margin: '.2rem 0' } }, partLabel(best.p)),
       h('div.muted', partSub(best.p), ` — ${fmt1(best.avg)} / ${max}`)) : null,
@@ -1683,7 +1684,198 @@ function viewResults() {
           crits.map(c => h('td.r', fmt1(r.critAvg[c.id]))),
           h('td.r', h('b', fmt1(r.avg))),
           h('td.r.muted', r.avg != null && max ? Math.round(r.avg / max * 100) + '%' : '—')))))))) : h('div.panel.muted', 'No scores yet.'),
+    canEdit ? feedbackPanel() : null,
     h('p.small.muted', 'Average = mean of each judge\'s weighted total. Ties are flagged, not broken automatically.' + (canEdit ? ' Click a row to see or adjust individual scores.' : '')));
+}
+
+// ============================================================ printing (feedback sheets, paper score cards)
+// Pages are drawn into #print-root, the app is hidden while printing, and the pages are removed afterwards.
+function printPages(pages, { landscape = false } = {}) {
+  document.getElementById('print-root')?.remove();
+  const root = h('div#print-root', { class: landscape ? 'landscape' : '' }, pages);
+  document.body.append(root);
+  document.body.classList.add('printing'); document.documentElement.classList.add('printing');
+  const done = () => { document.body.classList.remove('printing'); document.documentElement.classList.remove('printing'); root.remove(); window.removeEventListener('afterprint', done); };
+  window.addEventListener('afterprint', done);
+  setTimeout(() => window.print(), 50);
+}
+
+// ============================================================ paper score cards (backup for when tablets can't be used)
+function paperCardsModal() {
+  const st = settings();
+  const o = ui.paper ||= { layout: 'cards', who: 'all', checkedOnly: false, blanks: heatsOn() ? (st.walkUps ?? 4) : 4, perJudge: true, notes: true };
+  const crits = criteria();
+  const js = judges().filter(j => j.active).sort((a, b) => a.displayName.localeCompare(b.displayName));
+  const rounds = heatsOn() ? roundOptions() : [];
+  const pool = () => {
+    let list = participants().filter(p => !isOut(p) && p.status !== 'pending' && (!o.checkedOnly || p.checkedIn || ['on_stage', 'done'].includes(p.status)));
+    const key = p => p.order ?? (parseFloat(p.number) || 1e9);
+    list.sort((a, b) => key(a) - key(b) || byNum(a, b));
+    if (o.who === 'blank') return [];
+    if (o.who === 'final') return list.filter(p => p.finalist).sort((a, b) => (a.finalOrder ?? 1e9) - (b.finalOrder ?? 1e9) || byNum(a, b));
+    if (o.who !== 'all') return list.filter(p => inHeat(p, o.who === 'none' ? 'none' : Number(o.who)));
+    return list;
+  };
+  const roundName = () => o.who === 'final' ? 'Finals' : o.who === 'all' || o.who === 'blank' ? '' : heatLabel(o.who === 'none' ? 'none' : Number(o.who));
+  const copies = () => o.perJudge && js.length ? js : [null];
+  const summary = h('p.small.muted');
+  const redraw = () => {
+    const n = pool().length, b = Math.max(0, o.blanks | 0), c = copies().length;
+    summary.textContent = o.layout === 'cards'
+      ? `${(n + b) * c} cards: ${n} ${n === 1 ? 'entry' : 'entries'}${b ? ` + ${b} blank` : ''}${c > 1 ? `, for each of ${c} judges` : ''}. About ${Math.ceil((n + b) / (crits.length > 6 || (o.notes && quickNotes().length > 15) ? 1 : 2)) * c} pages.`
+      : `${c} judge ${c === 1 ? 'sheet' : 'sheets'}, ${n} ${n === 1 ? 'row' : 'rows'}${b ? ` + ${b} blank` : ''} each.`;
+  };
+  const sel = (key, opts) => h('select', { onchange: e => { o[key] = e.target.value; redraw(); } }, opts.map(([v, l]) => h('option', { value: v, selected: String(o[key]) === String(v) }, l)));
+  const chk = (key, label) => h('label.check', h('input', { type: 'checkbox', checked: !!o[key], onchange: e => { o[key] = e.target.checked; redraw(); } }), label);
+  const close = openModal('Paper score cards', h('div.stack',
+    h('p.small.muted', 'A backup for when tablets can\'t be used. Judges write their scores, and someone types them in later on the Review page.'),
+    h('div.form-grid',
+      h('label.field', h('span', 'Layout'), sel('layout', [['cards', 'Cards: one per contestant (2 per page)'], ['sheet', 'Judge sheet: one table per judge (landscape)']])),
+      h('label.field', h('span', 'Who'), sel('who', [['all', 'Everyone signed up'], ...rounds.map(r => [String(r), heatLabel(r)]), ['blank', 'Blank only']])),
+      h('label.field', h('span', 'Blank extras (walk-ups)'), h('input', { type: 'number', min: 0, max: 100, value: o.blanks, oninput: e => { o.blanks = Math.max(0, Math.min(100, parseInt(e.target.value) || 0)); redraw(); } }))),
+    chk('checkedOnly', 'Only people who have checked in'),
+    js.length ? chk('perJudge', `A named copy for each judge (${js.map(j => j.displayName).join(', ')})`) : h('p.small.muted', 'No judges assigned yet, so cards have a line for the judge\'s name.'),
+    quickNotes().length ? chk('notes', 'Quick-note tick boxes on cards') : null,
+    summary),
+  [h('button.btn.ghost', { onclick: () => close() }, 'Cancel'),
+   h('button.btn.primary', { onclick: () => {
+     const list = pool(), blanks = Math.max(0, o.blanks | 0);
+     if (!list.length && !blanks) return toast('Nobody to print. Add blank cards, or pick another group.', 'bad');
+     close();
+     const pages = o.layout === 'cards'
+       ? copies().flatMap(j => [...list, ...Array(blanks).fill(null)].map(p => paperCard(p, j, crits, roundName(), o.notes)))
+       : copies().map(j => paperSheet(list, blanks, j, crits, roundName()));
+     printPages(o.layout === 'cards' ? paperCardPages(pages, cardsFitTwo(pages[0]) ? 2 : 1) : pages, { landscape: o.layout === 'sheet' });
+   } }, 'Print')]);
+  redraw();
+}
+const paperHead = (j, roundName) => {
+  const st = settings();
+  return h('div.pc-head',
+    h('div', h('div.pc-kicker', [eventName(), st.name, roundName].filter(Boolean).join(' · ')), h('div.pc-title', 'Score card')),
+    h('div.pc-judge', 'Judge: ', j ? h('b', j.displayName) : h('span.pc-line.w40')));
+};
+function paperCard(p, j, crits, roundName, notes) {
+  const W = WORDS();
+  const max = maxTotal(crits);
+  return h('div.pc-card',
+    paperHead(j, roundName),
+    h('div.pc-who', p ? [h('span.pc-num', '#' + (p.number || '?')), h('b', ' ' + (p.title || p.name || '')), p.title ? (p.name ? ` by ${p.name}` : '') : (p.character ? ` as ${p.character}` : ''), heatsOn() && p.heat && !roundName ? h('span.pc-heat', ` · Heat ${p.heat}`) : null]
+      : [h('span', '#'), h('span.pc-line.w10'), h('span', ` ${W.One}: `), h('span.pc-line.w45'), h('span', isMakers() ? ' Maker: ' : ' Character: '), h('span.pc-line.w30')]),
+    h('table.pc-crits', h('tbody',
+      crits.map(c => h('tr', h('td', h('b', c.name), c.description ? h('div.pc-desc', c.description) : null),
+        h('td.pc-score', h('span.pc-box'), ` / ${c.max}`, (c.weight ?? 1) !== 1 ? h('span.pc-w', ` ×${c.weight}`) : null))),
+      h('tr.pc-total', h('td', h('b', 'Total'), crits.some(c => (c.weight ?? 1) !== 1) ? h('div.pc-desc', 'Weighted: each score × its weight') : null), h('td.pc-score', h('span.pc-box.wide'), ` / ${max}`)))),
+    notes && quickNotes().length ? h('div.pc-notes', h('div.pc-h', 'Quick notes (tick any)'), h('div.pc-note-grid', quickNotes().map(t => h('span.pc-note', h('span.pc-tick'), t)))) : null,
+    h('div.pc-h', 'Comments'), h('div.pc-lines', h('div'), h('div')));
+}
+// Does a card fit in half a page? Measured off-screen at paper size (lots of criteria or quick notes may not).
+function cardsFitTwo(card) {
+  if (!card) return true;
+  const probe = h('div', { style: { position: 'fixed', left: '-10000px', top: '0', width: '196mm' } });
+  const c = card.cloneNode(true);
+  probe.append(c); document.body.append(probe);
+  const fits = c.scrollHeight <= c.clientHeight + 1;
+  probe.remove();
+  return fits;
+}
+// Two cards per sheet of paper (or one, when cards are long).
+function paperCardPages(cards, perPage) {
+  const pages = [];
+  for (let i = 0; i < cards.length; i += perPage) pages.push(h('section.sheet.pc-page', { class: perPage === 1 ? 'one' : '' }, cards.slice(i, i + perPage)));
+  return pages;
+}
+function paperSheet(list, blanks, j, crits, roundName) {
+  const W = WORDS();
+  const row = p => h('tr', h('td.mono', p ? p.number || '' : ''), h('td', p ? (p.title || p.name || '') : ''), h('td', p ? (p.title ? p.name || '' : p.character || '') : ''),
+    heatsOn() && !roundName ? h('td.c', p?.heat || '') : null, crits.map(() => h('td.pc-cell')), h('td.pc-cell'), h('td.pc-notes-cell'));
+  return h('section.sheet.pc-sheet',
+    paperHead(j, roundName),
+    h('table.pc-table',
+      h('thead', h('tr', h('th', '#'), h('th', W.One), h('th', isMakers() ? 'Maker' : 'Character'), heatsOn() && !roundName ? h('th', 'Heat') : null,
+        crits.map(c => h('th.c', c.name, h('div.pc-max', `/ ${c.max}${(c.weight ?? 1) !== 1 ? ` ×${c.weight}` : ''}`))), h('th.c', 'Total', h('div.pc-max', `/ ${maxTotal(crits)}`)), h('th', 'Notes'))),
+      h('tbody', list.map(row), Array.from({ length: blanks }, () => row(null)))),
+    h('div.pc-sign', 'Signed: ', h('span.pc-line.w40'), '   Date: ', h('span.pc-line.w20')));
+}
+
+// ============================================================ contestant feedback
+// What a contestant gets: per round, the average total, the average per category, the quick notes the judges ticked
+// (most-ticked first) and, if the lead allows, the judges' written comments. Never which judge gave what.
+// The server works this out the same way for emails and the contestant's private page.
+function feedbackFor(p, { comments = settings().feedback?.comments !== false } = {}) {
+  const crits = criteria();
+  const order = quickNotes();
+  const out = [];
+  for (const round of [null, 'final']) {
+    const scs = Object.values(S.data.scores).filter(s => s.participantId === p.id && !s.deleted && s.submitted && roundOf(s) === round && crits.some(k => s.values?.[k.id] != null));
+    if (!scs.length) continue;
+    const avg = xs => xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null;
+    const tally = new Map();
+    for (const s of scs) for (const t of s.tags || []) tally.set(t, (tally.get(t) || 0) + 1);
+    out.push({
+      round: round || 'main', total: avg(scs.map(s => scoreTotal(s, crits).total)), max: maxTotal(crits),
+      categories: crits.map(k => ({ name: k.name, avg: avg(scs.map(s => s.values?.[k.id]).filter(v => v != null)), max: k.max })),
+      notes: [...tally.entries()].sort((a, b) => b[1] - a[1] || (order.indexOf(a[0]) + 1 || 999) - (order.indexOf(b[0]) + 1 || 999) || a[0].localeCompare(b[0])).map(([t]) => t),
+      comments: comments ? scs.map(s => String(s.comment || '').trim()).filter(Boolean).sort((a, b) => a.localeCompare(b)) : [],
+    });
+  }
+  return out;
+}
+const f1 = n => n == null ? '–' : (Math.round(n * 10) / 10).toString();
+// The feedback itself, for a sheet or the contestant's page. rounds: from feedbackFor (or the server).
+function feedbackBody(rounds, heats) {
+  return rounds.map(r => h('div.fb-round',
+    heats ? h('h3.fb-round-name', r.round === 'final' ? 'Finals' : 'Heats') : null,
+    h('div.fb-total', h('span.fb-total-n', f1(r.total)), h('span.fb-total-of', ` out of ${f1(r.max)}`), h('div.fb-total-l', 'Average score')),
+    h('table.fb-cats', h('tbody', r.categories.map(k => h('tr',
+      h('td', k.name),
+      h('td.fb-bar', h('span', { style: { width: k.avg != null && k.max ? Math.max(2, Math.round(k.avg / k.max * 100)) + '%' : '0' } })),
+      h('td.r', h('b', f1(k.avg)), ` / ${k.max}`))))),
+    r.notes.length ? h('div.fb-sec', h('div.fb-h', 'What the judges noticed'), h('div.fb-notes', r.notes.map(t => h('span.fb-note', t)))) : null,
+    r.comments.length ? h('div.fb-sec', h('div.fb-h', 'Judges\' comments'), r.comments.map(t => h('p.fb-comment', t))) : null));
+}
+function feedbackSheet(p) {
+  const st = settings();
+  const ev = eventName();
+  return h('section.sheet.fb-sheet',
+    h('div.fb-top', h('div', h('div.fb-kicker', [ev, st.name].filter(Boolean).join(' · ')), h('h1', 'Judges\' feedback')), h('div.fb-num', '#' + (p.number || '?'))),
+    h('div.fb-who', h('b', p.title || p.name || ''), h('span', p.title ? (p.name ? ' by ' + p.name : '') : (p.character ? ' as ' + p.character : ''), p.series && !p.title ? ` (${p.series})` : '')),
+    feedbackBody(feedbackFor(p), heatsOn()),
+    h('p.fb-foot', 'Scores are averaged across all judges. Thank you for entering!'));
+}
+function feedbackPanel() {
+  const st = settings();
+  const fb = st.feedback || {};
+  const scored = participants().filter(p => !isOut(p) && p.status !== 'pending' && feedbackFor(p, { comments: false }).length).sort(byNum);
+  const withEmail = scored.filter(p => p.email);
+  const unsent = withEmail.filter(p => !p.feedbackSentAt);
+  const set = patch => mutate('contests', curId(), { feedback: { released: !!fb.released, comments: fb.comments !== false, ...patch } });
+  const sendAll = async again => {
+    const list = again ? withEmail : unsent;
+    if (!list.length) return;
+    if (!confirm(`Email feedback to ${list.length} ${list.length === 1 ? 'contestant' : 'contestants'}? Each gets only their own scores${fb.comments !== false ? ' and comments' : ''}.`)) return;
+    let sent = 0, failed = 0, rest = 1, guard = 0;
+    toast('Sending feedback…');
+    try {
+      while (rest > 0 && guard++ < 100) {
+        const r = await api('/api/feedback/email', { contestId: curId(), again, ids: again ? list.map(p => p.id) : undefined }, { token: S.account.token, timeout: 60000 });
+        sent += r.sent; failed += r.failed; rest = r.remaining;
+        if (again) { list.splice(0, list.length, ...list.slice(r.sent + r.failed)); if (!list.length) rest = 0; }
+      }
+      toast(`Feedback emailed to ${sent}${failed ? `. ${failed} couldn't be sent (see the audit log).` : '.'}`, failed ? 'warn' : 'ok');
+    } catch (e) { toast((sent ? `Sent ${sent}, then: ` : '') + e.message, 'bad'); }
+    sync();
+  };
+  return h('div.panel.stack.no-print.feedback-panel',
+    h('h3', 'Contestant feedback'),
+    h('p.small.muted', 'Each contestant gets their average score, their average for each category and the quick notes the judges ticked. It never says which judge gave what. Only submitted score sheets count.'),
+    h('div', h('label.check', h('input', { type: 'checkbox', checked: fb.comments !== false, onchange: e => set({ comments: e.target.checked }) }), 'Include the judges\' written comments (without names)')),
+    h('div', h('label.check', h('input', { type: 'checkbox', checked: !!fb.released, onchange: e => set({ released: e.target.checked }) }), 'Show feedback on contestants\' private sign-up pages')),
+    h('div.row',
+      h('button.btn', { disabled: !scored.length, onclick: () => printPages(scored.map(feedbackSheet)) }, `Print feedback sheets (${scored.length})`),
+      S.emailOn ? h('button.btn', { disabled: !unsent.length || S.net !== 'online', onclick: () => sendAll(false) }, unsent.length ? `Email feedback (${unsent.length} not sent yet)` : 'Feedback emailed to everyone') : null,
+      S.emailOn && withEmail.length > unsent.length ? h('button.btn.ghost', { disabled: S.net !== 'online', onclick: () => sendAll(true) }, 'Send again to everyone') : null),
+    S.emailOn ? h('p.small.muted', `${withEmail.length} of ${scored.length} scored ${scored.length === 1 ? 'entry has' : 'entries have'} an email address.`) : null);
 }
 // Heats: the top N across all heats combined, as the lead confirms them. Finals start from zero.
 function finalistsPanel(rows, judgeCount) {
@@ -1783,7 +1975,8 @@ function reviewDetail(p) {
   return h('div.stack',
     h('div.panel',
       h('div.row.between', h('div', h('h2', { style: { margin: 0 } }, partLabel(p)), h('div.muted', partSub(p))),
-        h('span.badge', { class: p.status }, (p.status || '').replace('_', ' '))),
+        h('div.row', manages() && feedbackFor(p, { comments: false }).length ? h('button.btn.sm', { onclick: () => printPages([feedbackSheet(p)]) }, 'Print feedback') : null,
+          h('span.badge', { class: p.status }, (p.status || '').replace('_', ' ')))),
       photoStrip(p),
       heatsOn() && p.finalist ? h('div.round-pick', { style: { marginTop: '1rem' } }, [[null, p.heat ? heatLabel(p.heat) : 'Heat'], ['final', 'Finals']].map(([k, label]) =>
         h('button', { type: 'button', class: round === k ? 'on' : '', onclick: () => { ui.reviewRound = k; render(); } }, label))) : null,
@@ -1975,7 +2168,8 @@ function viewSetup() {
             h('td', { style: { width: '90px' } }, h('input', { type: 'number', min: 0, step: 0.1, value: c.weight ?? 1, onchange: upd('weight', Number) })),
             h('td', h('button.btn.sm.danger', { onclick: () => { if (confirm(`Remove "${c.name}"? Existing scores for it will stop counting.`)) mutate('criteria', c.id, { deleted: true }); } }, 'Remove')));
         })))),
-      h('div', h('button.btn', { onclick: () => mutate('criteria', newId(), { contestId: cid, name: 'New criterion', description: '', max: 10, weight: 1, order: (crits.at(-1)?.order ?? 0) + 1 }) }, '+ Add criterion'))),
+      h('div.row', h('button.btn', { onclick: () => mutate('criteria', newId(), { contestId: cid, name: 'New criterion', description: '', max: 10, weight: 1, order: (crits.at(-1)?.order ?? 0) + 1 }) }, '+ Add criterion'),
+        crits.length ? h('button.btn.ghost', { onclick: paperCardsModal, title: 'Print score cards for judges to fill in by hand' }, 'Print paper score cards') : null)),
 
     accessPanel(cid, online),
 
@@ -2372,6 +2566,7 @@ async function signupEntryPage(body, head, key, entryId, token) {
       h('h2', e.title || e.name), h('p.muted', [e.character, e.title ? e.name : ''].filter(Boolean).join(' · ')),
       h('p', h('b', 'Status: '), word, e.heat ? ` · heat ${e.heat}` : ''),
       e.photos ? h('p.small.muted', `${e.photos} photo${e.photos === 1 ? '' : 's'} sent.`) : null,
+      e.feedback?.length ? h('div.fb-public', h('h2', 'Judges\' feedback'), feedbackBody(e.feedback, e.heats), h('p.small.muted', 'Scores are averaged across all judges.')) : null,
       out ? h('p.muted', e.status === 'withdrawn' ? 'You\'ve withdrawn from this contest. To sign up again, use the contest\'s sign-up link.' : 'Questions? Contact the organizers.')
         : ['on_stage', 'done'].includes(e.status) ? null
         : h('button.btn.danger', { onclick: async ev => {
