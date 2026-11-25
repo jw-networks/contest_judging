@@ -375,6 +375,7 @@ async function sync({ full = false } = {}) {
     }
   } catch (e) {
     batch.forEach(o => { delete o.sending; });
+    if (e.status === 401 && S.account.support) { toast('Your support visit has ended (12 hours). Open the organization again from the platform screen.', 'warn'); leaveSupport(); return; }
     if (e.status === 401) { setNet('auth'); }
     else setNet('offline');
   } finally {
@@ -623,7 +624,7 @@ function render() {
   // The contest picker only exists for people who can open two or more contests.
   const openable = myContests().filter(c => !c.archived);
   const switchable = openable.length > 1;
-  const shellKey = `${isAdmin()}|${role()}|${curId()}|${switchable}`;
+  const shellKey = `${isAdmin()}|${role()}|${curId()}|${switchable}|${!!S.account.support}`;
   if (!view || app.dataset.shell !== shellKey) {
     app.dataset.shell = shellKey;
     document.body.classList.toggle('multi-contest', switchable);
@@ -639,6 +640,8 @@ function render() {
         h('div.topbar-right',
           h('button.sync#sync', { onclick: syncMenu, title: 'Sync status' }),
           h('button.userbtn', { onclick: accountMenu, title: 'Account' }, icon('user'), h('span.who#who')))),
+      S.account.support ? h('div.support-bar', h('span.grow', 'You\'re in ', h('b', S.account.support.orgName), ' as Spotlight support. They can see this visit in their audit log.'),
+        h('button.btn.sm', { onclick: leaveSupport }, 'Back to my organization')) : null,
       h('main#view'),
       h('nav.tabbar#tabbar'));
     view = $('#view');
@@ -1857,6 +1860,8 @@ function describeAudit(a) {
     case 'access.update': return h('span', h('b', a.username), ` changed access: ${a.label}`);
     case 'user.update': return h('span', h('b', a.username), ` updated account ${a.label}`);
     case 'user.password': return h('span', h('b', a.username), ' changed their password');
+    case 'user.support': return h('span', h('b', 'Spotlight support'), ' opened this organization', a.label?.match(/\((.+)\)/) ? ` (${a.label.match(/\((.+)\)/)[1]})` : '');
+    case 'user.reset': return h('span', h('b', 'Spotlight support'), ` reset the password for ${String(a.label || '').replace(/ \(by Spotlight support\)$/, '')}`);
     case 'data.restore': return h('span', h('b', a.username), ' ', a.label);
     default: return h('span', h('b', a.username), ' ', a.action, ' ', a.label || '');
   }
@@ -2355,6 +2360,35 @@ async function signupEntryPage(body, head, key, entryId, token) {
 // ============================================================ platform (Spotlight super-admin)
 const orgLink = o => `${location.origin}${location.pathname}#/o/${o.code}`;
 const slugCode = t => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 30);
+// Platform admins: open a customer's organization as its "spotlight-support" admin, then come back.
+async function enterOrg(o) {
+  let r;
+  try { r = await api('/api/platform/orgs/' + o.id + '/enter', {}, { token: S.account.token, timeout: 30000 }); } catch (e) { return toast(e.message, 'bad'); }
+  await saveNow();
+  const acc = { username: r.user.username, org: r.org.code, user: r.user, token: r.token, server: serverBase(),
+    support: { orgName: r.org.name, returnTo: accKey(S.account.org, S.account.username) } };
+  S.clockOffset = r.serverTime - Date.now();
+  await saveAccount(acc);
+  location.hash = '#/';
+  await startSession(acc);
+  toast(`Opened ${r.org.name}`, 'ok');
+}
+async function leaveSupport() {
+  const back = S.account?.support?.returnTo;
+  const acc = S.account;
+  await saveNow();
+  if (acc.token) api('/api/logout', {}, { token: acc.token }).catch(() => {});
+  const all = await getAccounts();
+  delete all[accKey(acc.org, acc.username)]; // support sign-ins aren't kept on the device
+  await kv(DEVICE_DB, 'accounts', all);
+  await kv('cj-u-' + accKey(acc.org, acc.username), 'state', null).catch(() => {});
+  const mine = back && all[back];
+  if (mine?.token) { location.hash = '#/platform'; return startSession(mine); }
+  S.account = null; S.data = EMPTY(); S.outbox = []; S.rev = 0;
+  try { sessionStorage.removeItem('cj-active'); } catch {}
+  location.hash = '#/login'; render();
+}
+
 function viewPlatform() {
   const call = (path, body, method) => api('/api/platform' + path, body, { method, token: S.account.token, timeout: 30000 });
   const box = h('div.stack', h('div.panel.muted', S.net === 'online' ? 'Loading organizations…' : 'Connect to the internet to manage organizations.'));
@@ -2388,6 +2422,7 @@ function viewPlatform() {
             h('td', h('code', o.code), ' ', h('button.btn.sm.ghost', { title: orgLink(o), onclick: () => navigator.clipboard?.writeText(orgLink(o)).then(() => toast('Link copied', 'ok'), () => {}) }, 'Copy link')),
             ...['events', 'contests', 'entries', 'accounts'].map(k => h('td.r', o.stats ? o.stats[k] : '—')),
             h('td', h('div.row', { style: { justifyContent: 'flex-end', flexWrap: 'nowrap' } },
+              o.default ? null : h('button.btn.sm', { disabled: o.suspended, title: o.suspended ? 'Reactivate it first' : `Open ${o.name} as Spotlight support`, onclick: () => enterOrg(o) }, 'Open'),
               h('button.btn.sm.ghost', { onclick: () => { const v = prompt('Organization name:', o.name); if (v && v.trim() !== o.name) act(() => call('/orgs/' + o.id, { name: v.trim() }, 'PATCH'), 'Renamed'); } }, 'Rename'),
               h('button.btn.sm.ghost', { onclick: () => {
                 const v = prompt(`New sign-in code for ${o.name}. Devices using the old code "${o.code}" will need the new one.`, o.code);

@@ -127,6 +127,17 @@ async function platform(req, env, url) {
     orgCache.clear();
     return json(200, { org: { ...org, stats: await stats(org) } });
   }
+  if (route === 'POST /api/platform/orgs/:id/enter') {
+    const { orgs } = await directory(env, '/list');
+    const org = orgs.find(o => o.id === id);
+    if (!org) throw new HttpError(404, 'No such organization');
+    if (org.default) throw new HttpError(400, 'That\'s your own organization');
+    if (org.suspended) throw new HttpError(400, 'Reactivate this organization first. Nobody can sign in to a suspended one.');
+    const r = await internalCall(env, org.id, '/api/internal/enter', { method: 'POST', body: { by: me.user.username } });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new HttpError(r.status, d.error || 'Could not open the organization');
+    return json(200, { ...d, org: { id: org.id, code: org.code, name: org.name } });
+  }
   if (route === 'POST /api/platform/orgs/:id/reset') {
     const { orgs } = await directory(env, '/list');
     const org = orgs.find(o => o.id === id);
@@ -350,6 +361,7 @@ export class ContestDB {
       try {
         if (url.pathname === '/api/internal/whoami') return json(200, { user: this.contest.publicUser(await this.contest.requireUser(req)) });
         if (url.pathname === '/api/internal/stats') return json(200, this.contest.stats());
+        if (url.pathname === '/api/internal/enter') return json(200, await this.contest.supportSession((await req.json()).by));
         if (url.pathname === '/api/internal/reset') return json(200, await this.contest.resetAccountPassword((await req.json()).username));
         if (url.pathname === '/api/internal/setup') return json(409, { error: 'Already set up' });
       } catch (e) { return json(e.status || 500, { error: e.message || 'Server error' }); }

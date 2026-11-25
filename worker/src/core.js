@@ -535,6 +535,24 @@ export class Contest {
     await this.save();
     return { username: u.username, tempPassword: temp };
   }
+  /** Platform support: sign a Spotlight platform admin into this organization as its "spotlight-support" admin.
+   *  The account is visible in the org's own account list; every visit is in its audit log. Sessions last 12 hours. */
+  async supportSession(by) {
+    const uname = 'spotlight-support';
+    let u = Object.values(this.db.users).find(x => x.username === uname);
+    if (!u) {
+      const id = newId();
+      // Nobody knows this password: the only way in is from the platform screen.
+      u = this.db.users[id] = { id, username: uname, displayName: 'Spotlight support', role: 'admin', contests: {}, ...(await hashPassword(randomToken())), active: true, mustChangePassword: false, support: true, createdAt: Date.now(), rev: this.bump() };
+    } else if (!u.active || u.role !== 'admin') Object.assign(u, { active: true, role: 'admin', rev: this.bump() });
+    this.dirty.add('users');
+    const token = randomToken();
+    this.db.sessions[await sha256(token)] = { userId: u.id, expires: Date.now() + 12 * 3600 * 1000 };
+    this.dirty.add('sessions');
+    this.audit(u, 'user.support', { target: u.id, label: `Spotlight support (${String(by || '').slice(0, 40)}) opened this organization` });
+    await this.save();
+    return { token, user: this.publicUser(u), serverTime: Date.now() };
+  }
   stats() {
     const live = coll => Object.values(this.db.data[coll]).filter(r => !r.deleted);
     return { events: live('events').length, contests: live('contests').length, entries: live('participants').length, scores: live('scores').length, accounts: Object.keys(this.db.users).length, rev: this.db.rev };

@@ -607,3 +607,6 @@ pre.handover { margin: 0; padding: 12px; white-space: pre-wrap; font: 600 14px/1
 .btn.big { min-height: 52px; font-size: 18px; }
 .signup-photos .signup-thumbs:not(:empty) { margin-bottom: 8px; }
 [hidden] { display: none !important; }
+
+.support-bar { display: flex; gap: 12px; align-items: center; padding: 8px 18px; background: #3a2a0a; border-bottom: 2px solid var(--warn, #f0a020); color: #ffe2a8; font-size: 14px; position: sticky; top: var(--topbar-h, 0); z-index: 5; }
+.support-bar b { color: #fff; }
