@@ -1,6 +1,6 @@
 // Offline cache for the app shell. API calls always go to the network.
 // Bump VERSION when you change any file so devices pick up the update.
-const VERSION = 'spotlight-v26';
+const VERSION = 'spotlight-v27';
 const SHELL = ['./', 'index.html', 'app.js', 'qr.js', 'styles.css', 'config.js', 'manifest.webmanifest', 'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'fonts/Roboto-Variable.ttf', 'hex.svg'];
 
 self.addEventListener('install', e => {

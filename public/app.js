@@ -628,7 +628,7 @@ function render() {
   if (!view || app.dataset.shell !== shellKey) {
     app.dataset.shell = shellKey;
     document.body.classList.toggle('multi-contest', switchable);
-    app.replaceChildren(
+    app.replaceChildren(...[
       h('header.topbar',
         h('div.brand', h('img', { src: 'icons/icon.svg', alt: '' }),
           h('div.grow.brand-text', h('span.kicker#brand-kicker', APP_NAME), h('span#ev-name', settings().name))),
@@ -643,7 +643,7 @@ function render() {
       S.account.support ? h('div.support-bar', h('span.grow', 'You\'re in ', h('b', S.account.support.orgName), ' as Spotlight support. They can see this visit in their audit log.'),
         h('button.btn.sm', { onclick: leaveSupport }, 'Back to my organization')) : null,
       h('main#view'),
-      h('nav.tabbar#tabbar'));
+      h('nav.tabbar#tabbar')].filter(Boolean));
     view = $('#view');
   }
   if (switchable) {
