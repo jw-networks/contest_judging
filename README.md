@@ -132,6 +132,19 @@ From the repo: `npm run local` (same thing). The zip is rebuilt automatically by
 
 **Network notes:** use a normal (not "guest") Wi-Fi so devices can see each other, and give the server a fixed address on the router if you can. The server only answers to its IP address, `localhost`, `.local`/`.lan` names, the computer's own name, or names you add with `SPOTLIGHT_HOSTS`, and only to pages it served itself. Over plain http, browsers don't keep an offline copy of the app shell, so keep the app open on each tablet; scores are saved on the tablet either way. Put `cert.pem` and `key.pem` in `spotlight-data/` to serve https instead.
 
+## Contestant sign-up links
+
+Each contest can have its own sign-up form. Contest leads and admins turn it on in **Setup → Sign-ups**, which gives a link and a QR code (download it as a PNG for posters and tables).
+
+- **Review:** sign-ups wait as *pending review* in Check-in until someone taps Approve or Decline. Turn review off to accept everyone straight away.
+- **Form:** name, character and email are required by default. Each built-in question can be required, optional or off. You can rename it, or add your own questions (short answer, long answer, choose one, tick box). Contestants can attach up to 3 reference photos.
+- **Limits:** an optional closing time and maximum. With heats on, sign-ups fill regular heat places only, so walk-up places stay free.
+- **Withdrawing:** after signing up, each contestant gets a private link to their entry and can withdraw from it until they go on stage. The link's secret is stored only as a hash.
+- **Privacy:** emails, phone numbers and answers are visible to leads, coordinators and admins only, never to judges, tech, emcees or the public monitor. **New link** stops the old link and QR code working straight away.
+- **Spam:** a hidden trap field, plus at most 8 sign-ups per network address per hour.
+- **Organizations:** links for other organizations include the org code (`#/o/<code>/signup/…`), so entries always land in the right organization. Sign-ups also work on the local network server.
+- **Export:** "Download sign-ups (CSV)" lists everyone who signed up online, with their answers.
+
 ## Heats and finals
 
 In **Setup → Contest**, set **Heats** (0 = no heats) and **Finalists from all heats combined** (default 3).

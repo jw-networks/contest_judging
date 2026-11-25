@@ -247,7 +247,7 @@ function roundPicker(cur, onPick, { counts, finalsReady = participants().some(p 
 const heatSize = () => settings().heatSize ?? 14;
 const walkUpSlots = () => settings().walkUps ?? 4;
 function heatLoad(n, exceptId) {
-  const ps = participants().filter(p => p.heat === n && p.status !== 'no_show' && p.id !== exceptId);
+  const ps = participants().filter(p => p.heat === n && !isOut(p) && p.id !== exceptId);
   const walk = ps.filter(p => p.walkUp).length;
   return { reg: ps.length - walk, walk, total: ps.length, cap: heatSize() + walkUpSlots() };
 }
@@ -555,7 +555,8 @@ function home() {
   if ((r === 'tech' || r === 'emcee') && isMakers()) return 'none';
   return { admin: 'results', lead: 'results', viewer: 'results', coordinator: 'checkin', judge: 'judge', tech: 'tech', emcee: 'emcee' }[r] || 'none';
 }
-const route = () => { const [name, ...args] = location.hash.replace(/^#\/?/, '').split('/'); return { name: name || '', args }; };
+// Sign-up links keep their organization in the address (#/o/<code>/signup/…), so a refresh or bookmark stays on the right form.
+const route = () => { const [name, ...args] = location.hash.replace(/^#\/?/, '').replace(/^o\/[a-z0-9-]{1,30}\/(?=signup(\/|$))/i, '').split('/'); return { name: name || '', args }; };
 
 window.addEventListener('hashchange', () => render());
 
@@ -583,9 +584,11 @@ let monitorActive = false;
 // #/o/<code>/<rest>: an organization's link. Remembers the code on this device (or, for a monitor, shows that
 // org's monitor without signing in), then continues to <rest>.
 function takeOrgLink() {
+  if (/^#\/signup(\/|$)/.test(location.hash) && !CFG.local) { ui.orgOverride = ''; return false; } // the main organization's form
   const m = location.hash.match(/^#\/o\/([a-z0-9-]{1,30})(?:\/(.*))?$/i);
   if (!m || CFG.local) return false;
   const code = m[1].toLowerCase(), rest = m[2] || '';
+  if (rest.startsWith('signup')) { ui.orgOverride = code; return false; }
   if (rest.startsWith('monitor')) { ui.orgOverride = code; location.replace('#/' + rest); return true; }
   localStorage.setItem('cj-org', code);
   if (S.account && (S.account.org || '') !== code) { switchPerson(); return true; }
@@ -596,11 +599,14 @@ function takeOrgLink() {
 
 function render() {
   if (takeOrgLink()) return;
-  if (ui.orgOverride != null && route().name !== 'monitor') { ui.orgOverride = null; connectEvents(); }
+  if (ui.orgOverride != null && !['monitor', 'signup'].includes(route().name)) { ui.orgOverride = null; connectEvents(); }
   const app = $('#app');
   const r = route();
   if (r.name === 'monitor') { if (!monitorActive || (r.args[0] || null) !== mon.cid) renderMonitor(app); return; }
   monitorActive = false;
+  // Public sign-up pages: no account needed. Drawn once per address so a background sync never wipes the form.
+  if (r.name === 'signup') { if (signupShown !== location.hash) renderSignup(app, r.args); return; }
+  signupShown = null;
   if (!S.account) { renderLogin(app); return; }
   if (!r.name && !curId() && S.rev === 0) {
     // First sign-in on this device: wait for the first sync before choosing a start page.
@@ -809,32 +815,54 @@ async function renderLogin(app) {
 }
 
 // ============================================================ check-in (coordinator, admin)
+// Entry statuses. Sign-ups held for review are 'pending'; withdrawn/declined/no-show entries don't take a place.
+const OUT = ['no_show', 'withdrawn', 'declined'];
+const isOut = p => OUT.includes(p.status);
+const STATUS_WORDS = { pending: 'pending review', registered: 'registered', checked_in: 'checked in', on_stage: 'on stage', done: 'done', no_show: 'no-show', withdrawn: 'withdrawn', declined: 'declined' };
+const statusWord = s => STATUS_WORDS[s || 'registered'] || String(s).replace('_', ' ');
+const customFields = () => (settings().signup?.fields || []).filter(f => /^q_/.test(f.id));
+
 function viewCheckin() {
   const all = participants().sort(byNum);
   const st = settings();
   const W = WORDS();
   const readOnly = role() === 'viewer';
-  const counts = { all: all.length, waiting: all.filter(p => !p.checkedIn && p.status !== 'no_show').length, in: all.filter(p => p.checkedIn).length, no_show: all.filter(p => p.status === 'no_show').length };
+  const counts = {
+    all: all.filter(p => !['withdrawn', 'declined'].includes(p.status)).length,
+    pending: all.filter(p => p.status === 'pending').length,
+    waiting: all.filter(p => !p.checkedIn && !isOut(p) && p.status !== 'pending').length,
+    in: all.filter(p => p.checkedIn).length, no_show: all.filter(p => p.status === 'no_show').length,
+    left: all.filter(p => ['withdrawn', 'declined'].includes(p.status)).length,
+  };
+  if (ui.ci.filter === 'pending' && !counts.pending) ui.ci.filter = 'all';
   const dupes = {};
-  all.forEach(p => { if (p.number) dupes[p.number] = (dupes[p.number] || 0) + 1; });
-  const statusWord = s => (s || 'registered').replace('_', ' ');
+  all.forEach(p => { if (p.number && !isOut(p)) dupes[p.number] = (dupes[p.number] || 0) + 1; });
+  const approve = (p, e) => { e.stopPropagation(); mutate('participants', p.id, { status: 'registered' }); toast(`${partLabel(p)} approved`, 'ok'); };
+  const decline = (p, e) => { e.stopPropagation(); if (confirm(`Decline ${partLabel(p)}'s sign-up? They won't be in the contest. You can restore it later.`)) mutate('participants', p.id, { status: 'declined', checkedIn: false }); };
   const listEl = h('div.list');
   const draw = () => {
     const q = ui.ci.q.trim().toLowerCase();
     const rows = all.filter(p => {
-      if (ui.ci.filter === 'waiting' && (p.checkedIn || p.status === 'no_show')) return false;
+      if (ui.ci.filter === 'all' && ['withdrawn', 'declined'].includes(p.status)) return false;
+      if (ui.ci.filter === 'pending' && p.status !== 'pending') return false;
+      if (ui.ci.filter === 'left' && !['withdrawn', 'declined'].includes(p.status)) return false;
+      if (ui.ci.filter === 'waiting' && (p.checkedIn || isOut(p) || p.status === 'pending')) return false;
       if (ui.ci.filter === 'in' && !p.checkedIn) return false;
       if (ui.ci.filter === 'no_show' && p.status !== 'no_show') return false;
       if (ui.ci.division !== 'all' && p.division !== ui.ci.division) return false;
       if (heatsOn() && ui.ci.heat && ui.ci.heat !== 'all' && !inHeat(p, ui.ci.heat)) return false;
-      return !q || [p.number, p.name, p.title, p.character, p.series, p.materials].some(x => String(x || '').toLowerCase().includes(q));
+      return !q || [p.number, p.name, p.title, p.character, p.series, p.materials, p.email].some(x => String(x || '').toLowerCase().includes(q));
     });
     listEl.replaceChildren(...(rows.length ? rows.map(p => h('div.item', { onclick: readOnly ? null : () => editParticipant(p), style: readOnly ? { cursor: 'default' } : null },
       h('div.num', p.number || '–'),
       h('div.who', h('div.n', p.title || p.name || '(no name)', dupes[p.number] > 1 ? h('span.badge.no_show', { style: { marginLeft: '.5rem' } }, 'duplicate #') : null),
-        h('div.c', h('span.badge.mobile', { class: p.status || 'registered' }, statusWord(p.status)), partSub(p) || '—')),
+        h('div.c', h('span.badge.mobile', { class: p.status || 'registered' }, statusWord(p.status)), partSub(p) || '—', p.source === 'signup' ? h('span.src-tag', { title: 'Signed up online' + (p.signupAt ? ' on ' + new Date(p.signupAt).toLocaleString() : '') }, 'online') : null)),
       h('span.badge', { class: p.status || 'registered' }, statusWord(p.status)),
-      readOnly ? null : p.checkedIn
+      readOnly ? null : p.status === 'pending'
+        ? h('div.row.nowrap', h('button.btn.sm.ghost', { onclick: e => decline(p, e) }, 'Decline'), h('button.btn.ok', { onclick: e => approve(p, e) }, 'Approve'))
+      : ['withdrawn', 'declined'].includes(p.status)
+        ? h('button.btn.sm.ghost', { onclick: e => { e.stopPropagation(); mutate('participants', p.id, { status: 'registered' }); toast(`${partLabel(p)} restored`, 'ok'); } }, 'Restore')
+      : p.checkedIn
         ? h('button.btn.sm.ghost', { onclick: e => { e.stopPropagation(); mutate('participants', p.id, { checkedIn: false, status: 'registered' }); } }, 'Undo')
         : h('button.btn.ok', { onclick: e => { e.stopPropagation(); mutate('participants', p.id, { checkedIn: true, status: 'checked_in' }); toast(`${partLabel(p)} checked in`, 'ok'); } }, 'Check in')))
       : [h('p.muted', all.length ? 'Nothing matches.' : readOnly ? `No ${W.many} yet.` : `No ${W.many} yet. Add walk-ins here, or import a list in Contest setup.`)]));
@@ -854,11 +882,13 @@ function viewCheckin() {
         h('div.l', `${l.reg}/${heatSize()} registered` + (walkUpSlots() ? ` · ${l.walk}/${walkUpSlots()} walk-up` : '')),
         h('div.bar', h('span', { style: { width: Math.min(100, l.total / l.cap * 100) + '%' } })));
     })) : null,
+    !readOnly && counts.pending && ui.ci.filter !== 'pending' ? h('div.banner.warn', h('span.tag', 'Sign-ups'), h('span.grow', `${counts.pending} online sign-up${counts.pending === 1 ? ' is' : 's are'} waiting for review.`),
+      h('button.btn.primary', { onclick: () => { ui.ci.filter = 'pending'; render(); } }, 'Review')) : null,
     readOnly ? h('div.banner.info', h('span.tag', 'View only'), `You can see this contest's ${W.many} and results, but not change anything.`) : null,
     h('div.panel.stack',
       h('div.row', h('div.grow', search), readOnly ? null : h('button.btn.primary', { onclick: () => editParticipant(null, heatsOn() ? { walkUp: true } : {}) }, isMakers() ? '+ Entry' : '+ Walk-in')),
       h('div.row.between',
-        h('div.chips', chip('all', 'All'), chip('waiting', 'Not here yet'), chip('in', 'Checked in'), chip('no_show', 'No-show')),
+        h('div.chips', chip('all', 'All'), counts.pending ? chip('pending', 'Pending review') : null, chip('waiting', 'Not here yet'), chip('in', 'Checked in'), chip('no_show', 'No-show'), counts.left ? chip('left', 'Withdrawn') : null),
         st.divisions?.length ? h('select', { style: { width: 'auto' }, onchange: e => { ui.ci.division = e.target.value; draw(); } },
           h('option', { value: 'all' }, 'All ' + W.divisions.toLowerCase()), st.divisions.map(d => h('option', { value: d, selected: ui.ci.division === d }, d))) : null),
       listEl));
@@ -885,9 +915,18 @@ function editParticipant(p, defaults = {}) {
   const ta = k => h('textarea', { rows: 3 }, p[k] || '');
   const checkIn = h('input', { type: 'checkbox', checked: isNew ? true : !!p.checkedIn });
   const walkUpBox = h('input', { type: 'checkbox', checked: !!p.walkUp });
-  const statuses = isMakers() ? ['registered', 'checked_in', 'done', 'no_show'] : ['registered', 'checked_in', 'on_stage', 'done', 'no_show'];
-  const status = h('select', statuses.map(s2 => h('option', { value: s2, selected: (p.status || 'registered') === s2 }, s2.replace('_', ' '))));
-  const keys = [...PART_FIELDS[type].map(x => x[0]), 'division', 'judgeNotes', 'notes', 'contact', ...(isMakers() ? [] : ['music', 'lighting', 'pronunciation', 'intro'])];
+  const statuses = ['pending', 'registered', 'checked_in', ...(isMakers() ? [] : ['on_stage']), 'done', 'no_show', 'withdrawn', 'declined'];
+  const status = h('select', statuses.map(s2 => h('option', { value: s2, selected: (p.status || 'registered') === s2 }, statusWord(s2))));
+  const keys = [...PART_FIELDS[type].map(x => x[0]), 'division', 'judgeNotes', 'notes', 'contact', 'email', 'phone', ...(isMakers() ? [] : ['music', 'lighting', 'pronunciation', 'intro'])];
+  // Answers to the contest's own sign-up questions (custom fields), plus any from questions since removed.
+  const answers = { ...(p.answers || {}) };
+  const qs = [...customFields(), ...Object.keys(answers).filter(k => !customFields().some(f => f.id === k)).map(k => ({ id: k, label: '(removed question)', type: 'text' }))];
+  const answerInputs = qs.map(q => {
+    const el = q.type === 'check' ? h('input', { type: 'checkbox', checked: !!answers[q.id] })
+      : q.type === 'choice' ? h('select', h('option', { value: '' }, '—'), [...new Set([...(q.options || []), ...(answers[q.id] ? [answers[q.id]] : [])])].map(o => h('option', { value: o, selected: answers[q.id] === o }, o)))
+      : q.type === 'long' ? h('textarea', { rows: 2 }, answers[q.id] || '') : h('input', { type: 'text', value: answers[q.id] || '' });
+    return { q, el };
+  });
   const close = openModal(isNew ? `Add ${W.one}` : `Edit ${partLabel(p)}`, h('div.stack',
     h('div.form-grid',
       PART_FIELDS[type].map(([k, label, ph]) => field(k, label, inp(k, ph))),
@@ -910,7 +949,13 @@ function editParticipant(p, defaults = {}) {
       isNew ? null : field('status', 'Status', status)),
     field('judgeNotes', isMakers() ? 'Notes shown to judges (build log, techniques, references)' : 'Notes shown to judges (build notes, references)', ta('judgeNotes')),
     field('notes', isMakers() ? 'Private staff notes (table number, fragile, pickup time…) — not shown to judges' : 'Private staff notes (accessibility, special needs…) — not shown to judges', ta('notes')),
-    field('contact', 'Contact (private)', inp('contact', 'Phone or email')),
+    h('div.form-grid',
+      field('email', 'Email (private)', inp('email', 'name@example.com')),
+      field('phone', 'Phone (private)', inp('phone', '')),
+      field('contact', 'Other contact (private)', inp('contact', 'Discord, Instagram…'))),
+    answerInputs.length ? h('div.stack', h('h3', 'Sign-up answers'),
+      h('div.form-grid', answerInputs.map(({ q, el }) => q.type === 'check' ? h('label.check', el, q.label) : h('label.field', h('span', q.label), el)))) : null,
+    p.source === 'signup' && !isNew ? h('p.small.muted', `Signed up online${p.signupAt ? ' on ' + new Date(p.signupAt).toLocaleString() : ''}.`) : null,
     isMakers() ? null : h('div.stack', h('h3', 'For tech & emcee'),
       h('div.form-grid', PART_FIELDS.show.map(([k, label, ph]) => field(k, label, inp(k, ph)))),
       field('intro', 'Emcee intro (read on stage)', ta('intro'))),
@@ -936,6 +981,11 @@ function editParticipant(p, defaults = {}) {
             if (!manages()) { toast(msg + ' Pick another heat, or ask the contest lead.', 'bad'); return; }
             if (!confirm(msg + ' Add anyway?')) return;
           }
+        }
+        if (answerInputs.length) {
+          const next = { ...answers };
+          for (const { q, el } of answerInputs) next[q.id] = q.type === 'check' ? el.checked : el.value.trim();
+          if (JSON.stringify(next) !== JSON.stringify(answers)) patch.answers = next;
         }
         if (isNew && !(isMakers() ? patch.title || patch.name : patch.name)) { toast(isMakers() ? 'Please enter an entry title or maker' : 'Please enter a name', 'bad'); return; }
         if (isNew) { patch.contestId = curId(); patch.checkedIn = checkIn.checked; patch.status = checkIn.checked ? 'checked_in' : 'registered'; }
@@ -1548,7 +1598,7 @@ function computeResults(includeDrafts, round = null) {
   const final = round === 'final';
   const jIds = new Set(judges().filter(j => j.active).map(j => j.id));
   const pool = heatsOn() && final ? participants().filter(p => p.finalist) : participants();
-  const rows = pool.filter(p => p.status !== 'no_show' || (final && p.finalist)).map(p => {
+  const rows = pool.filter(p => (!isOut(p) && p.status !== 'pending') || (final && p.finalist && p.status === 'no_show')).map(p => {
     const scs = Object.values(S.data.scores).filter(s => s.participantId === p.id && !s.deleted && roundOf(s) === (final ? 'final' : null) && (s.submitted || includeDrafts) && scoreTotal(s, crits).filled);
     scs.forEach(s => jIds.add(s.judgeId));
     const totals = scs.map(s => scoreTotal(s, crits).total);
@@ -1790,6 +1840,8 @@ function describeAudit(a) {
       h('div.muted', 'before: ', vals(a.before?.values) || 'none', ' → after: ', vals(a.after?.values), a.after?.submitted === false ? ' (not submitted)' : ''));
     case 'score.submit': return h('span', h('b', a.username), ` submitted a score for ${pl}`);
     case 'participant.checkin': return h('span', h('b', a.username), ` checked in ${a.label}`);
+    case 'participant.signup': return h('span', h('b', 'Online sign-up: '), a.label);
+    case 'participant.withdraw': return h('span', h('b', 'Online: '), a.label);
     case 'participant.checkout': return h('span', h('b', a.username), ` undid check-in for ${a.label}`);
     case 'participant.delete': return h('span', h('b', a.username), ` deleted ${a.label}`);
     case 'event.create': return h('span', h('b', a.username), ` created the event ${a.label}`);
@@ -1905,6 +1957,8 @@ function viewSetup() {
 
     accessPanel(cid, online),
 
+    manages() ? signupPanel(cid, online) : null,
+
     h('div.panel.stack', h('h3', `Import ${W.many}`),
       h('p.small.muted', 'Paste rows from a spreadsheet or choose a CSV file. First row must be headers. Recognised columns: ' + (isMakers()
         ? 'number, entry title, maker, category, materials, judge notes, notes, contact, checked in.'
@@ -1918,6 +1972,89 @@ function viewSetup() {
 }
 
 /** Clear personal data (admins, leads) and delete the contest (admins). */
+// ---------- Setup → Sign-ups (contest leads and admins)
+const randKey = () => Array.from(crypto.getRandomValues(new Uint8Array(18)), b => 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789'[b % 56]).join('');
+const toLocalInput = t => { if (!t) return ''; const d = new Date(t); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); };
+function downloadQrPng(text, name) {
+  const m = qrMatrix(text), n = m.length + 8, px = Math.max(8, Math.ceil(1200 / n));
+  const cv = document.createElement('canvas'); cv.width = cv.height = n * px;
+  const g = cv.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, cv.width, cv.height); g.fillStyle = '#000';
+  m.forEach((row, y) => row.forEach((v, x) => { if (v) g.fillRect((x + 4) * px, (y + 4) * px, px, px); }));
+  cv.toBlob(b => { const a = document.createElement('a'); a.href = URL.createObjectURL(b); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); }, 'image/png');
+}
+function signupPanel(cid, online) {
+  const c = S.data.contests[cid];
+  const saved = c?.signup;
+  if (!saved) return h('div.panel.stack', h('h3', 'Sign-ups'), h('p.small.muted', 'Sign-ups appear here once this device has synced with the server.'));
+  const d = (ui.sg ||= {})[cid] ||= JSON.parse(JSON.stringify(saved));
+  const dirty = JSON.stringify(d) !== JSON.stringify(saved);
+  // Save the form editor's draft…
+  const save = (patch, msg) => { Object.assign(d, patch || {}); if (d.enabled && !d.key) d.key = randKey(); mutate('contests', cid, { signup: JSON.parse(JSON.stringify(d)) }); ui.sg[cid] = null; if (msg) toast(msg, 'ok'); };
+  // …or change just one setting (open/closed, new link), leaving any unsaved form edits as a draft.
+  const quick = (patch, msg) => {
+    const next = { ...JSON.parse(JSON.stringify(saved)), ...patch };
+    if (next.enabled && !next.key) next.key = randKey();
+    mutate('contests', cid, { signup: next });
+    if (dirty) Object.assign(d, { enabled: next.enabled, key: next.key }); else ui.sg[cid] = null;
+    if (msg) toast(msg, 'ok');
+  };
+  const link = saved.key ? signupHref(saved.key) : '';
+  // Typing only updates the Save button. Redrawing the panel would swap out the box the person taps next.
+  const saveBtn = h('button.btn.primary', { disabled: !dirty, onclick: () => save(null, 'Sign-up form saved') }, dirty ? 'Save form & settings' : 'Saved');
+  const discardBtn = h('button.btn.ghost', { hidden: !dirty, onclick: () => { ui.sg[cid] = null; render(); } }, 'Discard changes');
+  const touch = () => { const dd = JSON.stringify(d) !== JSON.stringify(saved); saveBtn.disabled = !dd; saveBtn.textContent = dd ? 'Save form & settings' : 'Saved'; discardBtn.hidden = !dd; };
+  const mine = participants().filter(p => p.source === 'signup');
+  const pending = mine.filter(p => p.status === 'pending').length;
+  const qr = h('div.qr-box'); if (link && saved.enabled) qr.innerHTML = qrSvg(link, { size: 168 });
+  const STATE = [['required', 'Required'], ['optional', 'Optional'], ['hidden', 'Off']];
+  const fieldRow = (f, i) => {
+    const custom = /^q_/.test(f.id);
+    return h('div.sg-field', { class: f.state === 'hidden' ? 'off' : '' },
+      h('input', { type: 'text', value: f.label, 'aria-label': 'Question', oninput: e => { f.label = e.target.value; touch(); } }),
+      custom ? h('select', { 'aria-label': 'Answer type', onchange: e => { f.type = e.target.value; render(); } },
+        [['text', 'Short answer'], ['long', 'Long answer'], ['choice', 'Choose one'], ['check', 'Tick box']].map(([v, l]) => h('option', { value: v, selected: (f.type || 'text') === v }, l)))
+        : h('span.small.muted.sg-kind', f.id === 'photos' ? 'Photos (up to 3)' : f.id === 'division' ? `Pick from ${WORDS().divisions.toLowerCase()}` : 'Built in'),
+      h('select', { 'aria-label': 'Required?', onchange: e => { f.state = e.target.value; render(); } }, STATE.map(([v, l]) => h('option', { value: v, selected: f.state === v }, l))),
+      custom ? h('button.btn.sm.ghost', { title: 'Remove this question', onclick: () => { d.fields.splice(i, 1); render(); } }, '✕') : h('span'),
+      custom && f.type === 'choice' ? h('input.sg-options', { type: 'text', placeholder: 'Choices, separated by commas', value: (f.options || []).join(', '),
+        oninput: e => { f.options = e.target.value.split(',').map(x => x.trim()).filter(Boolean); touch(); } }) : null);
+  };
+  const exportCsv = () => {
+    const qs = (saved.fields || []).filter(f => /^q_/.test(f.id));
+    const head = ['Number', 'Status', isMakers() ? 'Entry title' : 'Name', isMakers() ? 'Maker' : 'Character', 'Series', WORDS().division, 'Email', 'Phone', 'Heat', ...qs.map(q => q.label), 'Signed up'];
+    const rows = mine.sort(byNum).map(p => [p.number, statusWord(p.status), isMakers() ? p.title : p.name, isMakers() ? p.name : p.character, p.series, p.division, p.email, p.phone, p.heat || '',
+      ...qs.map(q => { const v = p.answers?.[q.id]; return v === true ? 'yes' : v === false ? 'no' : v || ''; }), p.signupAt ? new Date(p.signupAt).toLocaleString() : '']);
+    download(`signups-${slug(c.name)}.csv`, [head, ...rows].map(r => r.map(csvCell).join(',')).join('\n') + '\n', 'text/csv');
+  };
+  return h('div.panel.stack.signup-panel',
+    h('div.row.between', h('h3', 'Sign-ups'),
+      h('label.check.switch', h('input', { type: 'checkbox', checked: !!saved.enabled, disabled: !online && !saved.enabled, onchange: e => quick({ enabled: e.target.checked }, e.target.checked ? 'Sign-ups are open' : 'Sign-ups are closed') }),
+        saved.enabled ? 'Open' : 'Closed')),
+    h('p.small.muted', 'Contestants sign up on their phone with a private link. They go straight into this contest' + (saved.review ? ', waiting for your review in Check-in.' : '.')),
+    saved.enabled && link ? h('div.signup-link',
+      qr,
+      h('div.stack.grow',
+        h('div.local-addr', h('code', link), h('button.btn.sm.ghost', { onclick: () => navigator.clipboard?.writeText(link).then(() => toast('Link copied', 'ok'), () => {}) }, 'Copy')),
+        h('div.row', h('a.btn.sm', { href: link, target: '_blank', rel: 'noopener' }, 'Open the form ↗'),
+          h('button.btn.sm', { onclick: () => downloadQrPng(link, `signup-qr-${slug(c.name)}.png`) }, 'Download QR code'),
+          h('button.btn.sm.ghost', { onclick: () => { if (confirm('Make a new link? The current link and QR code stop working straight away.')) quick({ key: randKey() }, 'New link ready. Share the new one.'); } }, 'New link')),
+        h('p.small.muted', `${mine.filter(p => !['withdrawn', 'declined'].includes(p.status)).length} signed up online${pending ? `, ${pending} waiting for review` : ''}.`,
+          mine.length ? h('button.btn.sm.ghost', { style: { marginLeft: '6px' }, onclick: exportCsv }, 'Download sign-ups (CSV)') : null))) : null,
+    h('details.sg-settings', { open: !!ui.sgOpen?.[cid], ontoggle: e => { (ui.sgOpen ||= {})[cid] = e.target.open; } },
+      h('summary', 'Form & settings'),
+      h('div.stack',
+        h('label.check', h('input', { type: 'checkbox', checked: d.review, onchange: e => { d.review = e.target.checked; render(); } }), 'Hold sign-ups for review (approve them in Check-in)'),
+        h('div.form-grid',
+          h('label.field', h('span', 'Close sign-ups at (optional)'), h('input', { type: 'datetime-local', value: toLocalInput(d.closesAt), oninput: e => { d.closesAt = e.target.value ? new Date(e.target.value).getTime() : null; touch(); } })),
+          h('label.field', h('span', 'Most sign-ups (optional)'), h('input', { type: 'number', min: 1, value: d.max || '', placeholder: heatsOn() ? 'Heat places limit it already' : 'No limit', oninput: e => { d.max = Number(e.target.value) || null; touch(); } }))),
+        h('label.field', h('span', 'Message at the top of the form (optional)'), h('textarea', { rows: 2, placeholder: 'e.g. Pre-judging is Saturday 10am in Hall B. Bring your reference photos.', oninput: e => { d.message = e.target.value; touch(); } }, d.message || '')),
+        h('label.field', h('span', 'Rules / photo-release box (optional; they must tick it)'), h('textarea', { rows: 2, placeholder: 'e.g. I have read the contest rules and agree that photos of my entry may be shared.', oninput: e => { d.consent = e.target.value; touch(); } }, d.consent || '')),
+        h('b', 'Questions on the form'),
+        h('div.sg-fields', d.fields.map(fieldRow)),
+        h('div', h('button.btn.sm', { onclick: () => { d.fields.push({ id: 'q_' + randKey().toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8), label: 'New question', type: 'text', state: 'optional' }); render(); } }, icon('plus'), 'Add a question')),
+        h('div.row', saveBtn, discardBtn))));
+}
+
 function afterEventPanel(cid, online) {
   const st = settings();
   const box = (label, on) => { const i = h('input', { type: 'checkbox', checked: on }); return { i, el: h('label.check', i, label) }; };
@@ -2106,6 +2243,113 @@ function githubPanel(online) {
   else if (CFG.local) body.replaceChildren(localServerPanel(null));
   const title = h('h3', 'GitHub data copy');
   return CFG.local ? body : h('div.panel.stack', title, body);
+}
+
+// ============================================================ public sign-up pages
+// #/signup/<key>                         the contest's form (from the lead's link or QR code)
+// #/signup/<key>/entry/<entryId>/<token>  the contestant's own page: status, and withdraw
+let signupShown = null;
+const signupHref = (key, extra = '') => `${location.origin}${location.pathname}#/${orgCode() ? 'o/' + orgCode() + '/' : ''}signup/${key}${extra}`;
+function renderSignup(app, [key, sub, entryId, token]) {
+  signupShown = location.hash;
+  app.dataset.shell = '';
+  const body = h('div.stack', h('p.muted', 'Loading…'));
+  app.replaceChildren(h('div.signup-page', h('div.logo', h('img', { src: 'icons/icon.svg', alt: '' }), h('span.kicker', APP_NAME)), body));
+  const fail = msg => body.replaceChildren(h('div.panel.stack', h('h2', 'Sign-up'), h('p', msg)));
+  api('/api/signup/' + encodeURIComponent(key || '')).then(info => {
+    const head = h('div.signup-head', info.eventName ? h('span.kicker', info.eventName) : null, h('h1', info.contest.name));
+    if (sub === 'entry') return signupEntryPage(body, head, key, entryId, token);
+    if (!info.open) return body.replaceChildren(head, h('div.panel.stack', h('p', info.reason), h('p.small.muted', 'Questions? Contact the organizers.')));
+    signupForm(body, head, key, info);
+  }).catch(e => fail(e.message || 'Could not load this sign-up form. Check your connection and try again.'));
+}
+function signupForm(body, head, key, info) {
+  const inputs = {};
+  let files = [];
+  const thumbs = h('div.signup-thumbs');
+  const req = f => f.state === 'required';
+  const label = f => h('span', f.label, req(f) ? h('b.req', ' *') : h('span.muted', ' (optional)'));
+  const fields = info.fields.map(f => {
+    if (f.type === 'photos') {
+      const drawThumbs = () => { thumbs.replaceChildren(...files.map((file, i) => h('div.signup-thumb', h('img', { src: URL.createObjectURL(file), alt: '' }),
+        h('button', { type: 'button', 'aria-label': 'Remove photo', onclick: () => { files.splice(i, 1); drawThumbs(); } }, '×')))); pick.hidden = files.length >= info.maxPhotos; };
+      const fi = h('input', { type: 'file', accept: 'image/*', multiple: true, onchange: e => { files = [...files, ...e.target.files].slice(0, info.maxPhotos); e.target.value = ''; drawThumbs(); } });
+      const pick = h('label.btn', icon('plus'), 'Add photos', fi);
+      return h('div.field.signup-photos', label(f), h('p.small.muted', `Up to ${info.maxPhotos} photos of your ${info.contest.type === 'makers' ? 'build' : 'costume or reference art'}.`), thumbs, pick);
+    }
+    const el = f.type === 'long' ? h('textarea', { rows: 3, maxlength: 2000 })
+      : f.type === 'choice' ? h('select', h('option', { value: '' }, 'Choose…'), (f.options || []).map(o => h('option', { value: o }, o)))
+      : f.type === 'check' ? h('input', { type: 'checkbox' })
+      : h('input', { type: f.type === 'email' ? 'email' : f.id === 'phone' ? 'tel' : 'text', maxlength: 300, autocomplete: { name: 'name', email: 'email', phone: 'tel' }[f.id] || 'off' });
+    inputs[f.id] = { f, el };
+    return f.type === 'check' ? h('label.check', el, f.label, req(f) ? h('b.req', ' *') : null) : h('label.field', label(f), el);
+  });
+  const trap = h('input', { type: 'text', name: 'website', tabindex: -1, autocomplete: 'off', 'aria-hidden': 'true' });
+  const consent = info.consent ? h('input', { type: 'checkbox' }) : null;
+  const err = h('p.err');
+  const btn = h('button.btn.primary.big', { type: 'submit' }, 'Sign up');
+  const form = h('form.panel.stack', {
+    onsubmit: async e => {
+      e.preventDefault(); err.textContent = '';
+      const values = {};
+      for (const [id, { f, el }] of Object.entries(inputs)) values[id] = f.type === 'check' ? el.checked : el.value.trim();
+      const missing = Object.values(inputs).find(({ f, el }) => req(f) && (f.type === 'check' ? !el.checked : !el.value.trim()));
+      if (missing) { err.textContent = `Please fill in “${missing.f.label}”.`; missing.el.focus(); return; }
+      if (consent && !consent.checked) { err.textContent = 'Please tick the box to agree to the rules.'; return; }
+      btn.disabled = true; btn.textContent = 'Sending…';
+      try {
+        const r = await api('/api/signup/' + key, { values, consent: consent ? consent.checked : true, website: trap.value }, { timeout: 20000 });
+        let sent = 0;
+        for (const file of files) {
+          btn.textContent = `Uploading photos… ${sent + 1} of ${files.length}`;
+          const blob = await shrinkImage(file).catch(() => file);
+          const res = await fetch(serverBase() + `/api/signup/${key}/photo?entry=${encodeURIComponent(r.entry)}&token=${encodeURIComponent(r.token)}`, { method: 'POST', headers: orgHeaders({ 'Content-Type': blob.type || 'image/jpeg' }), body: blob }).catch(() => null);
+          if (res?.ok) sent++;
+        }
+        signupDone(body, head, key, r, files.length - sent);
+      } catch (x) { err.textContent = x.message; btn.disabled = false; btn.textContent = 'Sign up'; }
+    },
+  },
+    info.message ? h('p.signup-msg', info.message) : null,
+    ...fields,
+    h('div.hp', h('label', 'Leave this empty', trap)),
+    consent ? h('label.check.consent', consent, h('span', info.consent, h('b.req', ' *'))) : null,
+    err, btn,
+    h('p.small.muted', info.review ? 'The organizers review every sign-up. You\'ll see your entry number when you submit.' : 'You\'ll get your entry number when you submit.'));
+  body.replaceChildren(head, form);
+}
+function signupDone(body, head, key, r, photoFails) {
+  const link = signupHref(key, `/entry/${r.entry}/${r.token}`);
+  body.replaceChildren(head, h('div.panel.stack.signup-done',
+    h('div.kicker', r.status === 'pending' ? 'Received — waiting for review' : 'You\'re signed up'),
+    r.number ? h('div.big-num', '#' + r.number) : null,
+    h('p', r.status === 'pending' ? 'Thanks! The organizers will review your sign-up. Your entry number is above.' : 'Thanks! Your entry number is above. Please check in when you arrive.'),
+    r.heat ? h('p', `You're in heat ${r.heat}.`) : null,
+    photoFails ? h('p.err', `${photoFails} photo${photoFails === 1 ? '' : 's'} didn't upload. You can bring them on the day.`) : null,
+    h('div.banner.warn', h('span.tag', 'Save this'), h('span.grow', 'This private link shows your entry and lets you withdraw. Bookmark it or copy it somewhere safe: it\'s the only copy.')),
+    h('div.local-addr', h('code', link), h('button.btn.sm.ghost', { onclick: () => navigator.clipboard?.writeText(link).then(() => toast('Copied', 'ok'), () => {}) }, 'Copy')),
+    h('div.row', h('a.btn', { href: link }, 'Open my entry'), h('button.btn.ghost', { onclick: () => { signupShown = null; render(); } }, 'Sign up another entry'))));
+}
+async function signupEntryPage(body, head, key, entryId, token) {
+  const q = `?entry=${encodeURIComponent(entryId || '')}&token=${encodeURIComponent(token || '')}`;
+  const draw = e => {
+    const out = ['withdrawn', 'declined', 'no_show'].includes(e.status);
+    const word = { pending: 'Waiting for review', registered: 'Signed up', checked_in: 'Checked in', on_stage: 'On stage', done: 'Competed', withdrawn: 'Withdrawn', declined: 'Not accepted', no_show: 'Marked as not attending' }[e.status] || e.status;
+    body.replaceChildren(head, h('div.panel.stack',
+      h('span.kicker', 'Your entry'), h('div.big-num', '#' + e.number),
+      h('h2', e.title || e.name), h('p.muted', [e.character, e.title ? e.name : ''].filter(Boolean).join(' · ')),
+      h('p', h('b', 'Status: '), word, e.heat ? ` · heat ${e.heat}` : ''),
+      e.photos ? h('p.small.muted', `${e.photos} photo${e.photos === 1 ? '' : 's'} sent.`) : null,
+      out ? h('p.muted', e.status === 'withdrawn' ? 'You\'ve withdrawn from this contest. To sign up again, use the contest\'s sign-up link.' : 'Questions? Contact the organizers.')
+        : ['on_stage', 'done'].includes(e.status) ? null
+        : h('button.btn.danger', { onclick: async ev => {
+          if (!confirm('Withdraw from this contest? Your place goes to someone else. This can\'t be undone here.')) return;
+          ev.target.disabled = true;
+          try { await api(`/api/signup/${key}/withdraw`, { entry: entryId, token }); toast('You\'ve withdrawn', 'ok'); load(); } catch (x) { ev.target.disabled = false; toast(x.message, 'bad'); }
+        } }, 'Withdraw my entry')));
+  };
+  const load = () => api(`/api/signup/${key}/entry${q}`).then(draw).catch(e => body.replaceChildren(head, h('div.panel.stack', h('p', e.message))));
+  load();
 }
 
 // ============================================================ platform (Spotlight super-admin)

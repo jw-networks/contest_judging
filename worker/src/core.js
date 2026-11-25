@@ -17,7 +17,48 @@ const SHOW_FIELDS = ['music', 'lighting', 'intro', 'pronunciation']; // stage de
 const MAX_PHOTOS = 8, MAX_PHOTO_BYTES = 1_200_000; // Cloudflare storage values max out at 2 MB
 export const CONTEST_TYPES = ['cosplay', 'makers'];
 export const COLLS = ['settings', 'events', 'contests', 'criteria', 'participants', 'scores', 'stage'];
-const STATUSES = ['registered', 'checked_in', 'on_stage', 'done', 'no_show'];
+const STATUSES = ['pending', 'registered', 'checked_in', 'on_stage', 'done', 'no_show', 'withdrawn', 'declined'];
+// Entries that don't take a place (heat counts, numbering of who's in): left, or turned away.
+export const OUT_STATUSES = ['no_show', 'withdrawn', 'declined'];
+// ---------- public sign-ups (contest.signup)
+// Built-in fields per contest type: [id, label, participant property, default state]. Custom fields are added by
+// the lead (id q_…) and stored in participant.answers. States: required | optional | hidden.
+export const SIGNUP_BUILTIN = {
+  cosplay: [['name', 'Your name', 'name', 'required'], ['character', 'Character', 'character', 'required'], ['email', 'Email', 'email', 'required'],
+    ['series', 'Series / source', 'series', 'hidden'], ['division', 'Division', 'division', 'optional'], ['phone', 'Phone', 'phone', 'hidden'],
+    ['pronunciation', 'How to say your name', 'pronunciation', 'optional'], ['intro', 'Intro for the emcee', 'intro', 'optional'],
+    ['music', 'Music', 'music', 'hidden'], ['lighting', 'Lighting requests', 'lighting', 'hidden'], ['photos', 'Reference photos', null, 'optional']],
+  makers: [['title', 'Entry title', 'title', 'required'], ['name', 'Maker name', 'name', 'required'], ['email', 'Email', 'email', 'required'],
+    ['division', 'Category', 'division', 'optional'], ['materials', 'Materials', 'materials', 'optional'], ['phone', 'Phone', 'phone', 'hidden'], ['photos', 'Photos', null, 'optional']],
+};
+export const SIGNUP_MAX_PHOTOS = 3;
+const FIELD_TYPES = ['text', 'long', 'choice', 'check'];
+function cleanSignup(sg, type) {
+  const builtin = SIGNUP_BUILTIN[type] || SIGNUP_BUILTIN.cosplay;
+  const out = {
+    enabled: !!sg.enabled, review: sg.review !== false,
+    key: /^[A-Za-z0-9_-]{16,48}$/.test(sg.key || '') ? sg.key : null,
+    closesAt: sg.closesAt ? Math.round(num(sg.closesAt, 0, 1e14, 0)) || null : null,
+    max: sg.max ? Math.round(num(sg.max, 1, 100000, 0)) || null : null,
+    message: str(sg.message || '', 1500), consent: str(sg.consent || '', 1500),
+    fields: [],
+  };
+  const seen = new Set();
+  for (const f of Array.isArray(sg.fields) ? sg.fields.slice(0, 40) : []) {
+    if (!f || typeof f.id !== 'string' || seen.has(f.id)) continue;
+    const b = builtin.find(x => x[0] === f.id);
+    const custom = /^q_[a-z0-9]{2,20}$/.test(f.id);
+    if (!b && !custom) continue;
+    seen.add(f.id);
+    const state = ['required', 'optional', 'hidden'].includes(f.state) ? f.state : 'optional';
+    out.fields.push(b ? { id: f.id, state, label: str(f.label || b[1], 80) || b[1] }
+      : { id: f.id, state, label: str(f.label, 80) || 'Question', type: FIELD_TYPES.includes(f.type) ? f.type : 'text',
+          options: f.type === 'choice' && Array.isArray(f.options) ? f.options.map(o => str(o, 80)).filter(Boolean).slice(0, 30) : undefined });
+  }
+  for (const b of builtin) if (!seen.has(b[0])) out.fields.push({ id: b[0], state: b[3], label: b[1] }); // every built-in is listed
+  return out;
+}
+export const defaultSignup = type => cleanSignup({}, type);
 const STAGE_STATES = ['idle', 'ready', 'running', 'paused', 'finished'];
 const TOKEN_TTL_MS = 14 * 24 * 3600 * 1000;
 const PBKDF2_ITER = 50000; // Cloudflare caps PBKDF2 at 100k; 50k keeps logins inside free-plan CPU limits
@@ -165,9 +206,11 @@ export class Contest {
     // Contests made before quick notes existed get the default list for their type.
     let b = false;
     for (const c of Object.values(this.db.data.contests || {})) {
-      if (Array.isArray(c.quickNotes) || c.deleted) continue;
-      c.quickNotes = [...(DEFAULTS[c.type] || DEFAULTS.cosplay).quickNotes];
-      c.rev = this.bump(); this.dirty.add('c:contests'); b = true;
+      if (c.deleted) continue;
+      let ch = false;
+      if (!Array.isArray(c.quickNotes)) { c.quickNotes = [...(DEFAULTS[c.type] || DEFAULTS.cosplay).quickNotes]; ch = true; }
+      if (!c.signup) { c.signup = defaultSignup(c.type); ch = true; } // sign-ups start switched off
+      if (ch) { c.rev = this.bump(); this.dirty.add('c:contests'); b = true; }
     }
     if (b) this.flags.rev = true;
     return a || b;
@@ -254,7 +297,7 @@ export class Contest {
     const d = DEFAULTS[type] || DEFAULTS.cosplay;
     const put = (coll, rec) => { db.data[coll][rec.id] = { ...rec, rev: this.bump(), updatedAt: now, updatedBy: by }; this.dirty.add('c:' + coll); };
     const order = Object.values(db.data.contests).length + 1;
-    put('contests', { id, eventId, name: str(name, 120) || 'New contest', type, stageSeconds: 90, warnSeconds: 15, divisions: d.divisions, quickNotes: d.quickNotes, scoresLocked: false, order, createdAt: now });
+    put('contests', { id, eventId, name: str(name, 120) || 'New contest', type, stageSeconds: 90, warnSeconds: 15, divisions: d.divisions, quickNotes: d.quickNotes, signup: defaultSignup(type), scoresLocked: false, order, createdAt: now });
     d.criteria.forEach(([cname, description], i) => put('criteria', { id: `${id}-c${i + 1}`, contestId: id, name: cname, description, max: 10, weight: 1, order: i + 1 }));
     put('stage', { id, contestId: id, participantId: null, nextParticipantId: null, state: 'idle', durationMs: 90000, startedAt: null, remainingMs: 90000 });
     return id;
@@ -353,6 +396,133 @@ export class Contest {
     return { contests: cids, names, entries: counts.entries, scores: counts.scores, accountsAdded: added, accountsUpdated: updated, photosNeeded: photos };
   }
 
+  // ---------- public sign-ups
+  signupContest(key) {
+    const c = Object.values(this.db.data.contests).find(x => !x.deleted && x.signup?.key && x.signup.key === key);
+    if (!c) throw new HttpError(404, 'This sign-up link isn\'t valid any more. Ask the organizers for a new one.');
+    return c;
+  }
+  signupState(c) {
+    const sg = c.signup || {};
+    const ev = this.db.data.events?.[c.eventId];
+    const taken = Object.values(this.db.data.participants).filter(p => p.contestId === c.id && !p.deleted && !OUT_STATUSES.includes(p.status)).length;
+    let reason = '';
+    if (!sg.enabled || c.archived || (ev && ev.archived)) reason = 'Sign-ups for this contest are closed.';
+    else if (sg.closesAt && Date.now() > sg.closesAt) reason = 'Sign-ups for this contest have closed.';
+    else if (sg.max && taken >= sg.max) reason = 'This contest is full.';
+    else if ((c.heats || 0) > 0 && !this.placeHeat(c)) reason = 'This contest is full.';
+    return { open: !reason, reason };
+  }
+  // Heat for a new pre-registered entry: the heat with a free regular place and the fewest people (null if none).
+  placeHeat(c) {
+    const n = c.heats || 0, size = c.heatSize ?? 14, walk = c.walkUps ?? 4;
+    let best = null, bestN = Infinity;
+    for (let h = 1; h <= n; h++) {
+      const ps = Object.values(this.db.data.participants).filter(p => p.contestId === c.id && p.heat === h && !p.deleted && !OUT_STATUSES.includes(p.status));
+      const reg = ps.filter(p => !p.walkUp).length;
+      if (reg < size && ps.length < size + walk && ps.length < bestN) { best = h; bestN = ps.length; }
+    }
+    return best;
+  }
+  async signupEntry(c, url, body) {
+    const entry = String(body?.entry || url.searchParams.get('entry') || ''), token = String(body?.token || url.searchParams.get('token') || '');
+    const p = this.db.data.participants[entry];
+    if (!p || p.deleted || p.contestId !== c.id || !p.withdrawHash || !token || (await sha256(token)) !== p.withdrawHash) throw new HttpError(404, 'We couldn\'t find that entry. Check the link you were given.');
+    return p;
+  }
+  async signupRoute(req, url, key, action, ip) {
+    const db = this.db, c = this.signupContest(key), sg = c.signup;
+    const ev = db.data.events?.[c.eventId];
+    const fields = (sg.fields || []).filter(f => f.state !== 'hidden');
+    if (!action && req.method === 'GET') {
+      return json(200, {
+        contest: { name: c.name, type: c.type }, eventName: ev?.name || db.data.settings.event?.name || '',
+        ...this.signupState(c), review: !!sg.review, message: sg.message || '', consent: sg.consent || '', maxPhotos: SIGNUP_MAX_PHOTOS,
+        fields: fields.map(f => ({ ...f, ...(f.id === 'division' ? { type: 'choice', options: c.divisions || [] } : {}), ...(f.id === 'email' ? { type: 'email' } : {}),
+          ...(['intro'].includes(f.id) ? { type: 'long' } : {}), ...(f.id === 'photos' ? { type: 'photos' } : {}) })).filter(f => f.id !== 'division' || (c.divisions || []).length),
+      });
+    }
+    if (!action && req.method === 'POST') {
+      const body = await readBody(req, 50_000);
+      // Spam trap: a field people never see. Bots fill it in; pretend it worked.
+      if (body.website) return json(200, { ok: true, number: '', status: sg.review ? 'pending' : 'registered', entry: '', token: '' });
+      // At most 8 sign-ups per network address per hour (shared phones at a desk are fine; floods are not).
+      const hits = (this.signupHits ||= new Map());
+      const now = Date.now(), mine = (hits.get(ip) || []).filter(t => now - t < 3600_000);
+      if (mine.length >= 8) throw new HttpError(429, 'Too many sign-ups from this network. Please try again later, or ask the organizers.');
+      const st = this.signupState(c);
+      if (!st.open) throw new HttpError(409, st.reason);
+      const v = body.values && typeof body.values === 'object' ? body.values : {};
+      const builtin = SIGNUP_BUILTIN[c.type] || SIGNUP_BUILTIN.cosplay;
+      const rec = { contestId: c.id, answers: {} };
+      for (const f of fields) {
+        if (f.id === 'photos') continue;
+        const b = builtin.find(x => x[0] === f.id);
+        let val = v[f.id];
+        if (!b && f.type === 'check') val = !!val;
+        else val = typeof val === 'string' ? val.trim() : '';
+        const empty = val === '' || val === false;
+        if (f.state === 'required' && empty) throw new HttpError(400, `Please fill in “${f.label}”.`);
+        if (empty) continue;
+        if (f.id === 'email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val)) throw new HttpError(400, 'Please check your email address.');
+        if (f.id === 'division' && !(c.divisions || []).includes(val)) throw new HttpError(400, `Please choose a ${f.label.toLowerCase()} from the list.`);
+        if (!b && f.type === 'choice' && !(f.options || []).includes(val)) throw new HttpError(400, `Please choose an answer for “${f.label}”.`);
+        if (b) rec[b[2]] = str(val, f.id === 'intro' ? 2000 : 300);
+        else rec.answers[f.id] = typeof val === 'boolean' ? val : str(val, 2000);
+      }
+      if (sg.consent && !body.consent) throw new HttpError(400, 'Please tick the box to agree to the contest rules.');
+      // Same email + same character (or entry title) already in: probably a double submit.
+      const same = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+      const dup = rec.email && Object.values(db.data.participants).find(p => p.contestId === c.id && !p.deleted && !OUT_STATUSES.includes(p.status)
+        && same(p.email, rec.email) && same(c.type === 'makers' ? p.title : p.character, c.type === 'makers' ? rec.title : rec.character));
+      if (dup) throw new HttpError(409, `You're already signed up${dup.number ? ` as #${dup.number}` : ''} with this email${c.type === 'makers' ? ' and entry' : ' and character'}. If something's wrong, contact the organizers.`);
+      const nums = Object.values(db.data.participants).filter(p => p.contestId === c.id).map(p => parseInt(p.number)).filter(n => n > 0);
+      const id = newId(), token = randHex(16);
+      const heat = (c.heats || 0) > 0 ? this.placeHeat(c) : null;
+      Object.assign(rec, {
+        id, number: String((nums.length ? Math.max(...nums) : 0) + 1), status: sg.review ? 'pending' : 'registered', checkedIn: false,
+        source: 'signup', signupAt: now, withdrawHash: await sha256(token), photos: [],
+        ...(heat ? { heat, walkUp: false } : {}), createdAt: now, updatedAt: now, updatedBy: 'signup', rev: this.bump(),
+      });
+      db.data.participants[id] = rec;
+      this.dirty.add('c:participants'); this.flags.rev = true;
+      mine.push(now); hits.set(ip, mine);
+      this.audit(null, 'participant.signup', { contestId: c.id, target: id, label: `${rec.title || rec.name} signed up${sg.review ? ' (waiting for review)' : ''}` });
+      return json(200, { ok: true, entry: id, token, number: rec.number, status: rec.status, heat: rec.heat || null });
+    }
+    if (action === 'photo' && req.method === 'POST') {
+      const p = await this.signupEntry(c, url);
+      if (!fields.some(f => f.id === 'photos')) throw new HttpError(400, 'This contest doesn\'t take photos with sign-ups.');
+      if (OUT_STATUSES.includes(p.status)) throw new HttpError(409, 'This entry was withdrawn.');
+      if ((p.photos || []).length >= SIGNUP_MAX_PHOTOS) throw new HttpError(400, `At most ${SIGNUP_MAX_PHOTOS} photos.`);
+      const type = (req.headers.get('Content-Type') || '').split(';')[0];
+      if (!['image/jpeg', 'image/png', 'image/webp'].includes(type)) throw new HttpError(415, 'Photos must be JPEG, PNG or WebP');
+      const buf = new Uint8Array(await req.arrayBuffer());
+      if (!buf.length || buf.length > MAX_PHOTO_BYTES) throw new HttpError(413, 'Photo missing or too large');
+      const pid = newId();
+      await this.store.put({ ['photo:' + pid]: { id: pid, contestId: c.id, participantId: p.id, type, data: buf, bytes: buf.length, createdAt: Date.now(), by: 'signup' } });
+      Object.assign(p, { photos: [...(p.photos || []), pid], rev: this.bump(), updatedAt: Date.now() });
+      this.dirty.add('c:participants'); this.flags.rev = true;
+      return json(200, { ok: true, photos: p.photos.length });
+    }
+    if (action === 'entry' && req.method === 'GET') {
+      const p = await this.signupEntry(c, url);
+      return json(200, { contest: c.name, eventName: ev?.name || '', number: p.number, name: p.name || '', character: p.character || '', title: p.title || '',
+        status: p.status, heat: (c.heats || 0) > 0 ? p.heat || null : null, photos: (p.photos || []).length, signupAt: p.signupAt });
+    }
+    if (action === 'withdraw' && req.method === 'POST') {
+      const body = await readBody(req, 5000);
+      const p = await this.signupEntry(c, url, body);
+      if (OUT_STATUSES.includes(p.status)) return json(200, { ok: true, status: p.status });
+      if (['on_stage', 'done'].includes(p.status)) throw new HttpError(409, 'You\'ve already competed, so this entry can\'t be withdrawn here. Please talk to the organizers.');
+      Object.assign(p, { status: 'withdrawn', checkedIn: false, withdrawnAt: Date.now(), rev: this.bump(), updatedAt: Date.now(), updatedBy: 'signup' });
+      this.dirty.add('c:participants'); this.flags.rev = true; this.flags.stages.add(c.id);
+      this.audit(null, 'participant.withdraw', { contestId: c.id, target: p.id, label: `#${p.number} ${p.title || p.name} withdrew using their sign-up link` });
+      return json(200, { ok: true, status: 'withdrawn' });
+    }
+    throw new HttpError(404, 'Unknown endpoint');
+  }
+
   /** Platform support: give an org's admin account a new temporary password (they must change it at sign-in). */
   async resetAccountPassword(username) {
     const u = Object.values(this.db.users).find(x => x.username === String(username || '').toLowerCase());
@@ -423,6 +593,7 @@ export class Contest {
 
   /** What a user may see of a record. null = nothing at all. */
   project(user, coll, rec) {
+    if (coll === 'participants' && rec.withdrawHash) rec = strip(rec, 'withdrawHash'); // the contestant's private key never leaves the server
     if (user.role === 'admin') return rec;
     if (coll === 'settings') return rec;
     if (coll === 'events') return Object.values(this.db.data.contests).some(c => c.eventId === rec.id && this.roleIn(user, c.id)) ? rec : null;
@@ -430,17 +601,18 @@ export class Contest {
     const r = this.roleIn(user, cid);
     if (!r) return null;
     switch (coll) {
-      case 'contests': case 'criteria': case 'stage': return rec;
+      case 'contests': return r === 'lead' || r === 'coordinator' ? rec : strip(rec, 'signup');
+      case 'criteria': case 'stage': return rec;
       case 'participants':
         if (r === 'lead' || r === 'coordinator') return rec;
-        if (r === 'viewer') return strip(rec, 'notes', 'contact');
+        if (r === 'viewer') return strip(rec, 'notes', 'contact', 'email', 'phone', 'answers');
         if (r === 'tech' || r === 'emcee') {
           if (rec.deleted) return { id: rec.id, rev: rec.rev, contestId: rec.contestId, hidden: true };
-          return strip(rec, 'notes', 'contact', 'judgeNotes', 'photos');
+          return strip(rec, 'notes', 'contact', 'email', 'phone', 'answers', 'judgeNotes', 'photos');
         }
         if (r === 'judge') {
           const visible = !rec.deleted && rec.checkedIn && rec.status !== 'no_show';
-          return visible ? strip(rec, 'notes', 'contact') : { id: rec.id, rev: rec.rev, contestId: rec.contestId, hidden: true };
+          return visible ? strip(rec, 'notes', 'contact', 'email', 'phone', 'answers') : { id: rec.id, rev: rec.rev, contestId: rec.contestId, hidden: true };
         }
         return null;
       case 'scores':
@@ -452,7 +624,7 @@ export class Contest {
     return null;
   }
 
-  cleanPatch(coll, patch) {
+  cleanPatch(coll, patch, existing) {
     const p = {};
     const has = k => Object.prototype.hasOwnProperty.call(patch, k);
     if (has('deleted')) p.deleted = !!patch.deleted;
@@ -480,6 +652,7 @@ export class Contest {
         // Heats: 0 = no heats (one round). With heats, every entry is in one heat; the top `finalists`
         // across all heats combined go on to a finals round that is scored again from zero.
         if (has('heats')) p.heats = Math.round(num(patch.heats, 0, 12, 0));
+        if (has('signup') && patch.signup && typeof patch.signup === 'object') p.signup = cleanSignup(patch.signup, (existing?.type) || patch.type || 'cosplay');
         if (has('finalists')) p.finalists = Math.round(num(patch.finalists, 1, 50, 3));
         // Heat capacity: heatSize pre-registered places, plus walkUps places kept for walk-ups (enforced in the app).
         if (has('heatSize')) p.heatSize = Math.round(num(patch.heatSize, 1, 500, 14));
@@ -497,7 +670,7 @@ export class Contest {
         break;
       case 'participants':
         if (has('contestId')) p.contestId = str(patch.contestId, 64);
-        for (const k of ['number', 'name', 'character', 'series', 'title', 'materials', 'division', 'judgeNotes', 'notes', 'contact', ...SHOW_FIELDS]) {
+        for (const k of ['number', 'name', 'character', 'series', 'title', 'materials', 'division', 'judgeNotes', 'notes', 'contact', 'email', 'phone', ...SHOW_FIELDS]) {
           if (has(k)) p[k] = str(patch[k], k.endsWith('otes') || k === 'intro' ? 2000 : 300);
         }
         if (has('status') && STATUSES.includes(patch.status)) p.status = patch.status;
@@ -507,6 +680,10 @@ export class Contest {
         if (has('finalist')) p.finalist = !!patch.finalist;
         if (has('walkUp')) p.walkUp = !!patch.walkUp;
         if (has('finalOrder')) p.finalOrder = num(patch.finalOrder, -1e9, 1e9, 0);
+        if (has('answers') && patch.answers && typeof patch.answers === 'object') {
+          p.answers = {};
+          for (const [k, v] of Object.entries(patch.answers).slice(0, 40)) if (/^q_[a-z0-9]{2,20}$/.test(k)) p.answers[k] = typeof v === 'boolean' ? v : str(v, 2000);
+        }
         break;
       case 'scores':
         if (has('values') && patch.values && typeof patch.values === 'object') {
@@ -546,7 +723,7 @@ export class Contest {
     if (!COLLS.includes(coll) || !id) return { ok: false, reason: 'invalid change' };
     const store = db.data[coll];
     const existing = store[id];
-    const patch = this.cleanPatch(coll, ch.patch || {});
+    const patch = this.cleanPatch(coll, ch.patch || {}, this.db.data[coll]?.[ch.id]);
     const before = existing ? JSON.parse(JSON.stringify(existing)) : null;
     const denied = { ok: false, reason: 'not permitted for your role in this contest' };
 
@@ -762,6 +939,11 @@ export class Contest {
     const db = this.db;
 
     if (route === 'GET /api/health') return json(200, { ok: true, rev: db.rev, schema: db.schema, serverTime: Date.now() });
+    // ---------- public sign-ups: /api/signup/<key>[/photo|/entry|/withdraw]. No account; the contest's private key
+    // is the only way in, and each entry gets its own private token (only its hash is stored) for photos and withdrawing.
+    const sgm = url.pathname.match(/^\/api\/signup\/([A-Za-z0-9_-]{16,48})(?:\/(photo|entry|withdraw))?$/);
+    if (sgm) return this.signupRoute(req, url, sgm[1], sgm[2] || '', ip);
+
     if (route === 'GET /api/stage') {
       const cid = url.searchParams.get('contest') || Object.keys(db.data.contests).find(id => this.contest(id)?.type === 'cosplay');
       const s = this.stagePublic(cid);
@@ -939,7 +1121,7 @@ export class Contest {
         let n = 0;
         for (const p of parts) {
           let changed = false;
-          if (what.contact && p.contact) { p.contact = ''; changed = true; }
+          if (what.contact && (p.contact || p.email || p.phone || (p.answers && Object.keys(p.answers).length))) { p.contact = ''; p.email = ''; p.phone = ''; p.answers = {}; changed = true; }
           if (what.notes && p.notes) { p.notes = ''; changed = true; }
           if (what.photos && (p.photos || []).length) { await this.store.delete(photoKeys([p])); p.photos = []; changed = true; }
           if (changed) { Object.assign(p, { rev: this.bump(), updatedAt: Date.now(), updatedBy: actor.id }); n++; }
