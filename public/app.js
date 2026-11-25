@@ -40,6 +40,7 @@ function newId() {
 const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; };
 const byNum = (a, b) => (parseFloat(a.number) || 1e9) - (parseFloat(b.number) || 1e9) || String(a.name || '').localeCompare(b.name || '');
 const fmt1 = n => (n == null || !isFinite(n) ? '—' : (Math.round(n * 100) / 100).toString());
+const fmtAgo = ts => { if (!ts) return 'never'; const m = Math.round((Date.now() - ts) / 60000); return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : fmtTime(ts); };
 const fmtTime = ts => ts ? new Date(ts).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '';
 function fmtClock(ms) {
   // Counting down: round up (shows 0:01 until the very end). Overtime: count up from +0:00.
@@ -2224,7 +2225,14 @@ function githubPanel(online) {
   const draw = st => {
     const pending = st.lastPushRev == null || st.lastPushRev !== st.rev;
     if (st.local && !st.configured) return body.replaceChildren(localServerPanel(st));
-    if (st.managed) { title.textContent = 'Data storage'; return body.replaceChildren(h('p.small.muted', 'Your organization\'s data is stored and kept safe by Spotlight. Use Backup below for a copy of your own, or Transfer contests to move contests to a local server.')); }
+    if (st.managed) {
+      title.textContent = 'Data storage';
+      return body.replaceChildren(...[
+        h('p.small.muted', 'Spotlight keeps your organization\'s data and backs it up automatically, photos included, within about a minute of any change. Every version is kept. If you ever need one back, contact Spotlight support. Use Backup below for a copy of your own, or Transfer contests to move contests to a local server.'),
+        h('p', h('b', 'Last automatic backup: '), st.on ? fmtAgo(st.lastPushAt) : 'not set up on this server', st.on && !st.upToDate ? h('span.muted', ' · newer changes are on their way') : null),
+        st.lastError && (!st.lastPushAt || st.lastErrorAt > st.lastPushAt) ? h('p.small', { style: { color: 'var(--bad)' } }, 'The last backup attempt failed. It retries automatically; Spotlight support has been notified on the platform screen.') : null,
+        st.on ? h('div', h('button.btn.sm', { disabled: !online, onclick: async e => { e.target.disabled = true; try { draw(await call('POST', { action: 'push' })); toast('Backed up', 'ok'); } catch (x) { toast(x.message, 'bad'); e.target.disabled = false; } } }, 'Back up now')) : null].filter(Boolean));
+    }
     body.replaceChildren(...[
       st.local ? localServerPanel(st) : null,
       h('p.small.muted', 'The live data is kept by the server and copied to the private GitHub repo ', h('b', `${st.repo}/${st.path}`), ` within about ${st.flushSeconds} seconds of any change.`),
@@ -2399,6 +2407,35 @@ function viewPlatform() {
       h('p.small.muted', 'Send these to the organization\'s admin. The temporary password is shown only now.'),
       h('pre.handover', text)), [h('button.btn', { onclick: () => navigator.clipboard?.writeText(text).then(() => toast('Copied', 'ok'), () => {}) }, 'Copy')]);
   };
+  const backupCell = o => {
+    const b = o.stats?.backup;
+    if (!o.stats) return h('button.btn.sm.ghost', { onclick: () => backupModal(o) }, h('span', { style: { color: 'var(--bad)' } }, 'Database unreachable'));
+    if (!b?.on) return h('span.small.muted', 'Off (no data repo)');
+    const failing = b.lastError && (!b.lastPushAt || b.lastErrorAt > b.lastPushAt);
+    return h('button.btn.sm.ghost.backup-cell', { title: 'Backup details', onclick: () => backupModal(o) },
+      h('span', { style: { color: failing ? 'var(--bad)' : b.lastPushAt ? '' : 'var(--warn)' } }, failing ? 'Failing' : fmtAgo(b.lastPushAt)));
+  };
+  const backupModal = o => {
+    const b = o.stats?.backup || {};
+    const failing = b.lastError && (!b.lastPushAt || b.lastErrorAt > b.lastPushAt);
+    const close = openModal(`Backups: ${o.name}`, h('div.stack',
+      h('p.small.muted', 'Every change is copied to your private data repo within about a minute, photos included. GitHub keeps every earlier version in the repo\'s history.'),
+      o.stats ? h('div.stack',
+        h('div', h('b', 'Last backup: '), fmtAgo(b.lastPushAt), b.lastPushAt ? h('span.muted', ` (${fmtTime(b.lastPushAt)})`) : null),
+        h('div', h('b', 'Photos: '), `${b.photos - (b.photosPending || 0)} of ${b.photos} backed up`),
+        b.restoredAt ? h('div.small.muted', 'Last restored ' + fmtTime(b.restoredAt)) : null,
+        failing ? h('div.banner.bad', h('span.tag', 'Error'), h('span.grow', b.lastError)) : null)
+        : h('div.banner.bad', h('span.tag', 'Problem'), h('span.grow', 'This organization\'s database didn\'t answer. If it was lost, Restore brings it back from the latest backup.')),
+      h('p.small.muted', h('b', 'Restore'), ' replaces everything in this organization with its latest backup. Changes made since then are lost. People stay signed in.')),
+      [h('button.btn', { onclick: async e => { e.target.disabled = true; const r = await act(() => call('/orgs/' + o.id + '/backup', {}, 'POST'), 'Backed up'); if (r) close(); else e.target.disabled = false; } }, 'Back up now'),
+       h('button.btn.danger', { onclick: async () => {
+         const v = prompt(`Restore ${o.name} from its latest backup? Everything changed since then is lost.\n\nType the organization code (${o.code}) to confirm:`);
+         if (v == null) return;
+         if (v.trim().toLowerCase() !== o.code) return toast('The code didn\'t match. Nothing was restored.', 'bad');
+         const r = await act(() => call('/orgs/' + o.id + '/restore', { confirm: o.code }, 'POST'));
+         if (r?.ok) { close(); toast(`Restored ${o.name} (backup from ${fmtTime(Date.parse(r.savedAt))})`, 'ok'); }
+       } }, 'Restore…')]);
+  };
   const act = async (fn, msg) => { try { const r = await fn(); if (msg) toast(msg, 'ok'); load(); return r; } catch (e) { toast(e.message, 'bad'); } };
   const draw = orgs => {
     const name = h('input', { type: 'text', placeholder: 'Organization name, e.g. Acme Con', value: d.name, oninput: e => { d.name = e.target.value; if (!d.codeEdited) { d.code = slugCode(d.name); code.value = d.code; } } });
@@ -2415,12 +2452,13 @@ function viewPlatform() {
     box.replaceChildren(
       h('div.panel.stack', h('h3', 'Organizations'),
         h('div.table-wrap', h('table',
-          h('thead', h('tr', h('th', 'Organization'), h('th', 'Code / sign-in link'), h('th.r', 'Events'), h('th.r', 'Contests'), h('th.r', 'Entries'), h('th.r', 'Accounts'), h('th', ''))),
+          h('thead', h('tr', h('th', 'Organization'), h('th', 'Code / sign-in link'), h('th.r', 'Events'), h('th.r', 'Contests'), h('th.r', 'Entries'), h('th.r', 'Accounts'), h('th', 'Backup'), h('th', ''))),
           h('tbody', orgs.map(o => h('tr', { style: { opacity: o.suspended ? .55 : 1 } },
             h('td', h('b', o.name), o.default ? h('span.badge', { style: { marginLeft: '8px' } }, 'yours') : null, o.suspended ? h('span.badge.no_show', { style: { marginLeft: '8px' } }, 'suspended') : null,
               h('div.small.muted', 'since ' + new Date(o.createdAt).toLocaleDateString())),
             h('td', h('code', o.code), ' ', h('button.btn.sm.ghost', { title: orgLink(o), onclick: () => navigator.clipboard?.writeText(orgLink(o)).then(() => toast('Link copied', 'ok'), () => {}) }, 'Copy link')),
             ...['events', 'contests', 'entries', 'accounts'].map(k => h('td.r', o.stats ? o.stats[k] : '—')),
+            h('td', backupCell(o)),
             h('td', h('div.row', { style: { justifyContent: 'flex-end', flexWrap: 'nowrap' } },
               o.default ? null : h('button.btn.sm', { disabled: o.suspended, title: o.suspended ? 'Reactivate it first' : `Open ${o.name} as Spotlight support`, onclick: () => enterOrg(o) }, 'Open'),
               h('button.btn.sm.ghost', { onclick: () => { const v = prompt('Organization name:', o.name); if (v && v.trim() !== o.name) act(() => call('/orgs/' + o.id, { name: v.trim() }, 'PATCH'), 'Renamed'); } }, 'Rename'),

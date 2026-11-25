@@ -553,6 +553,8 @@ export class Contest {
     await this.save();
     return { token, user: this.publicUser(u), serverTime: Date.now() };
   }
+  /** Every photo the data still points at. */
+  photoIds() { return Object.values(this.db.data.participants).filter(p => !p.deleted).flatMap(p => p.photos || []); }
   stats() {
     const live = coll => Object.values(this.db.data[coll]).filter(r => !r.deleted);
     return { events: live('events').length, contests: live('contests').length, entries: live('participants').length, scores: live('scores').length, accounts: Object.keys(this.db.users).length, rev: this.db.rev };
@@ -1100,7 +1102,16 @@ export class Contest {
     const pm = url.pathname.match(/^\/api\/photos\/([\w-]+)$/);
     if (pm) {
       const actor = await this.requireUser(req);
-      const rec = (await this.store.get(['photo:' + pm[1]])).get('photo:' + pm[1]);
+      let rec = (await this.store.get(['photo:' + pm[1]])).get('photo:' + pm[1]);
+      if (!rec && req.method === 'GET') {
+        // After a restore, photos come back from the backup the first time someone looks at them.
+        const owner = Object.values(db.data.participants).find(p => (p.photos || []).includes(pm[1]));
+        const got = owner && await this.hooks.missingPhoto?.(pm[1]);
+        if (got) {
+          rec = { id: pm[1], contestId: owner.contestId, participantId: owner.id, type: got.type, data: got.data, bytes: got.data.length, createdAt: Date.now(), by: 'restore' };
+          await this.store.put({ ['photo:' + rec.id]: rec });
+        }
+      }
       if (!rec) throw new HttpError(404, 'No such photo');
       const part = db.data.participants[rec.participantId];
       if (req.method === 'GET') {

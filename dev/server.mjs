@@ -49,26 +49,33 @@ function durable(name, Cls) {
   return instances.get(name);
 }
 
-// ---------- fake GitHub contents API backed by dev/.data/github/
-const ghFile = path.join(DATA, 'github', 'db.json');
+// ---------- fake GitHub contents API backed by dev/.data/github/ (db.json, photos/…, orgs/<id>/…)
+const ghRoot = path.join(DATA, 'github');
 const ghLog = [];
 async function fakeGitHub(url, init = {}) {
   const u = new URL(url);
   const respond = (status, body, raw = false) => new Response(raw ? body : JSON.stringify(body), { status });
   if (process.env.FAKE_GITHUB_DOWN) return respond(503, { message: 'unavailable' });
   if (/^\/repos\/[^/]+\/[^/]+$/.test(u.pathname)) return respond(200, { private: true });
-  const exists = fs.existsSync(ghFile);
-  const text = exists ? fs.readFileSync(ghFile, 'utf8') : '';
-  const sha = exists ? crypto.createHash('sha1').update(text).digest('hex') : undefined;
+  const m = u.pathname.match(/^\/repos\/[^/]+\/[^/]+\/contents\/(.+)$/);
+  if (!m) return respond(404, { message: 'Not Found' });
+  const rel = decodeURIComponent(m[1]);
+  if (rel.split('/').includes('..')) return respond(400, {});
+  const file = path.join(ghRoot, rel);
+  const exists = fs.existsSync(file);
+  const buf = exists ? fs.readFileSync(file) : null;
+  const sha = exists ? crypto.createHash('sha1').update(buf).digest('hex') : undefined;
   if (!init.method || init.method === 'GET') {
     if (!exists) return respond(404, { message: 'Not Found' });
-    return (init.headers?.Accept || '').includes('raw') ? respond(200, text, true) : respond(200, { sha });
+    return (init.headers?.Accept || '').includes('raw') ? new Response(buf, { status: 200 }) : respond(200, { sha });
   }
   if (init.method === 'PUT') {
     const body = JSON.parse(init.body);
+    if (exists && !body.sha) return respond(422, { message: '"sha" wasn\'t supplied.' });
     if (exists && body.sha !== sha) return respond(409, { message: 'sha mismatch' });
-    fs.writeFileSync(ghFile, Buffer.from(body.content, 'base64').toString('utf8'));
-    ghLog.push({ at: Date.now(), message: body.message });
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, Buffer.from(body.content, 'base64'));
+    ghLog.push({ at: Date.now(), path: rel, message: body.message });
     return respond(200, { content: {} });
   }
   return respond(405, {});

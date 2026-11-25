@@ -138,6 +138,16 @@ async function platform(req, env, url) {
     if (!r.ok) throw new HttpError(r.status, d.error || 'Could not open the organization');
     return json(200, { ...d, org: { id: org.id, code: org.code, name: org.name } });
   }
+  if (route === 'POST /api/platform/orgs/:id/backup' || route === 'POST /api/platform/orgs/:id/restore') {
+    const { orgs } = await directory(env, '/list');
+    const org = orgs.find(o => o.id === id);
+    if (!org) throw new HttpError(404, 'No such organization');
+    if (action === 'restore' && body.confirm !== org.code) throw new HttpError(400, 'Type the organization\'s code to confirm');
+    const r = await internalCall(env, org.id, '/api/internal/' + action, { method: 'POST', body: {} });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new HttpError(r.status, d.error || 'Failed');
+    return json(200, d);
+  }
   if (route === 'POST /api/platform/orgs/:id/reset') {
     const { orgs } = await directory(env, '/list');
     const org = orgs.find(o => o.id === id);
@@ -157,14 +167,27 @@ function randomPassword() {
 
 // ---------------------------------------------------------------- the directory of organizations
 export class Directory {
-  constructor(ctx, env) { this.ctx = ctx; this.env = env; }
+  constructor(ctx, env) { this.ctx = ctx; this.env = env; this.gh = new GitHubFile({ ...env, DATA_PATH: 'orgs/directory.json' }, env.FETCH || ((...a) => fetch(...a))); }
+  get backupOn() { return this.gh.configured && !this.env.LOCAL_MODE; }
+  async backup(orgs) {
+    if (!this.backupOn) return;
+    try { await this.gh.write(JSON.stringify({ format: 'spotlight-directory', savedAt: new Date().toISOString(), orgs }, null, 1), 'Organization list · ' + new Date().toISOString()); return true; }
+    catch (e) { console.error('directory backup failed', e); return false; }
+  }
   async orgs() {
     let orgs = await this.ctx.storage.get('orgs');
+    if (!orgs && this.backupOn) {
+      // Lost the list? Bring it back from the data repo before inventing a new one.
+      const saved = await this.gh.read().catch(e => { throw new HttpError(503, 'Can\'t load the organization list yet: ' + e.message); });
+      if (saved?.orgs) { orgs = saved.orgs; await this.ctx.storage.put('orgs', orgs); }
+    }
     if (!orgs) {
       // The original single database becomes the default organization.
       orgs = { [DEFAULT_ORG]: { id: DEFAULT_ORG, code: (this.env.DEFAULT_ORG_CODE || 'main').toLowerCase(), name: this.env.DEFAULT_ORG_NAME || 'My organization', default: true, suspended: false, createdAt: Date.now() } };
       await this.ctx.storage.put('orgs', orgs);
     }
+    if (this.backupOn && !this.backedUp && !(await this.ctx.storage.get('backedUp'))) { if (await this.backup(orgs)) await this.ctx.storage.put('backedUp', true); }
+    this.backedUp = true;
     return orgs;
   }
   async fetch(req) {
@@ -185,6 +208,7 @@ export class Directory {
         const org = { id, code: body.code, name: body.name, default: false, suspended: false, createdAt: Date.now(), createdBy: body.by || '' };
         orgs[id] = org;
         await this.ctx.storage.put('orgs', orgs);
+        await this.backup(orgs);
         return json(200, { org });
       }
       if (url.pathname === '/update') {
@@ -195,6 +219,7 @@ export class Directory {
         if (p.suspended && org.default) throw new HttpError(400, 'The default organization can\'t be suspended');
         Object.assign(org, p, { updatedAt: Date.now(), updatedBy: body.by || '' });
         await this.ctx.storage.put('orgs', orgs);
+        await this.backup(orgs);
         return json(200, { org });
       }
       throw new HttpError(404, 'Unknown directory call');
@@ -259,6 +284,23 @@ export class GitHubFile {
     if (!res.ok) throw await this.error(res, 'lookup');
     return (await res.json()).sha;
   }
+  /** Same repo and token, another file in it. */
+  at(path) { const f = new GitHubFile({ DATA_REPO: this.repo, DATA_BRANCH: this.branch, DATA_PATH: path, DATA_REPO_TOKEN: this.token }, this.fetch); return f; }
+  /** Raw bytes of a file, or null if it isn't there. */
+  async readBytes() {
+    const res = await this.fetch(`${this.url()}?ref=${encodeURIComponent(this.branch)}`, { headers: this.headers('application/vnd.github.raw+json') });
+    if (res.status === 404) return null;
+    if (!res.ok) throw await this.error(res, 'read');
+    return new Uint8Array(await res.arrayBuffer());
+  }
+  /** Write a file that never changes (photos): one request; "already there" counts as done. */
+  async writeOnce(bytes, message) {
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    const res = await this.fetch(this.url(), { method: 'PUT', headers: { ...this.headers(), 'Content-Type': 'application/json' }, body: JSON.stringify({ message, content: btoa(bin), branch: this.branch }) });
+    if (res.ok || res.status === 422) return; // 422: the file exists already
+    throw await this.error(res, 'write');
+  }
   async write(text, message) {
     for (let attempt = 0; attempt < 2; attempt++) {
       const sha = await this.sha();
@@ -280,10 +322,11 @@ export class ContestDB {
     this.env = env;
     this.gh = new GitHubFile(env, env.FETCH || ((...a) => fetch(...a))); // FETCH is only used by the local dev server's fake GitHub
     this.flushMs = Math.max(10, Number(env.FLUSH_SECONDS) || 30) * 1000;
-    this.orgId = DEFAULT_ORG; // read from storage in init(); databases made before organizations are the default org
+    this.setOrg(DEFAULT_ORG); // read from storage in init(); databases made before organizations are the default org
     const platformAdmins = String(env.PLATFORM_ADMINS || 'admin').split(',').map(x => x.trim().toLowerCase()).filter(Boolean);
     this.contest = new Contest(this.storeAdapter(), {
       broadcast: (t, d) => this.broadcast(t, d), local: !!env.LOCAL_MODE,
+      missingPhoto: id => this.photoFromBackup(id),
       isPlatform: u => !!env.DIRECTORY && this.orgId === DEFAULT_ORG && u.role === 'admin' && u.active !== false && platformAdmins.includes(u.username),
     });
     this.initError = null;
@@ -304,14 +347,27 @@ export class ContestDB {
     };
   }
 
-  // GitHub mirroring is for the default org only (other orgs: Spotlight-managed storage).
-  get gitHubOn() { return this.orgId === DEFAULT_ORG && this.gh.configured; }
+  // Every organization is backed up to the private GitHub data repo:
+  //   default org  → DATA_PATH (db.json) and photos/<id>
+  //   other orgs   → orgs/<orgId>/db.json and orgs/<orgId>/photos/<id>
+  // GitHub keeps every version in the repo's history.
+  get gitHubOn() { return this.gh.configured && !this.env.LOCAL_MODE; }
+  setOrg(orgId) {
+    this.orgId = orgId;
+    this.gh.path = orgId === DEFAULT_ORG ? (this.env.DATA_PATH || 'db.json') : `orgs/${orgId}/db.json`;
+    this.photoDir = orgId === DEFAULT_ORG ? 'photos/' : `orgs/${orgId}/photos/`;
+  }
 
   async init() {
     this.initError = null;
     try {
-      this.orgId = (await this.ctx.storage.get('orgId')) || DEFAULT_ORG;
-      if (await this.contest.load()) return;
+      this.setOrg((await this.ctx.storage.get('orgId')) || DEFAULT_ORG);
+      if (await this.contest.load()) {
+        // Never backed up (an organization made before backups existed, or photos never sent)? Start now.
+        const st = (await this.ctx.storage.get('gh')) || {};
+        if (this.gitHubOn && (!st.lastPushAt || !(await this.ctx.storage.get('ghPhotos')))) await this.scheduleFlush(5000);
+        return;
+      }
       this.fresh = true; // set up on first use: the default org seeds itself; other orgs wait for the platform's setup call
     } catch (e) {
       console.error('init failed', e);
@@ -352,6 +408,19 @@ export class ContestDB {
     if (this.fresh && !this.contest.db) {
       if (orgId === DEFAULT_ORG && !(await this.ctx.storage.get('orgId'))) await this.ctx.blockConcurrencyWhile(() => this.setupDefault());
       else if (internal && url.pathname === '/api/internal/setup') return this.setupOrg(req, orgId);
+      else if (internal && url.pathname === '/api/internal/restore') return this.ctx.blockConcurrencyWhile(async () => {
+        // The database is empty (lost or never made): bring it back from its backup.
+        try {
+          await this.ctx.storage.put('orgId', orgId); this.setOrg(orgId);
+          const snap = await this.gh.read();
+          if (!snap) return json(404, { error: 'There is no backup for this organization' });
+          await this.contest.importSnapshot(snap);
+          await this.contest.save();
+          this.fresh = false;
+          await this.ctx.storage.put('gh', { lastPushRev: this.contest.rev, lastPushAt: Date.now(), restoredAt: Date.now() });
+          return json(200, { ok: true, savedAt: snap.exportedAt, backup: await this.backupStatus() });
+        } catch (e) { return json(e.status || 502, { error: e.message }); }
+      });
       else return json(503, { error: 'This organization has not been set up yet.' });
     }
     if (!this.contest.db) return json(503, { error: 'Server is starting up: ' + this.initError });
@@ -360,7 +429,9 @@ export class ContestDB {
       if (!internal) return json(404, { error: 'Unknown endpoint' });
       try {
         if (url.pathname === '/api/internal/whoami') return json(200, { user: this.contest.publicUser(await this.contest.requireUser(req)) });
-        if (url.pathname === '/api/internal/stats') return json(200, this.contest.stats());
+        if (url.pathname === '/api/internal/stats') return json(200, { ...this.contest.stats(), backup: await this.backupStatus() });
+        if (url.pathname === '/api/internal/backup') { try { await this.pushToGitHub(true); } catch (e) { return json(502, { error: e.message }); } return json(200, { backup: await this.backupStatus() }); }
+        if (url.pathname === '/api/internal/restore') { const at = await this.restoreFromBackup(null); return json(200, { ok: true, savedAt: at, backup: await this.backupStatus() }); }
         if (url.pathname === '/api/internal/enter') return json(200, await this.contest.supportSession((await req.json()).by));
         if (url.pathname === '/api/internal/reset') return json(200, await this.contest.resetAccountPassword((await req.json()).username));
         if (url.pathname === '/api/internal/setup') return json(409, { error: 'Already set up' });
@@ -395,9 +466,10 @@ export class ContestDB {
       if (this.contest.db) return json(409, { error: 'Already set up' });
       try {
         await this.ctx.storage.put('orgId', orgId);
-        this.orgId = orgId;
+        this.setOrg(orgId);
         await this.contest.seed(body.password, { username: body.username || 'admin', displayName: body.displayName || 'Administrator', eventName: body.eventName || '' });
         this.fresh = false;
+        await this.scheduleFlush(5000);
         return json(200, { ok: true });
       } catch (e) { return json(400, { error: e.message }); }
     });
@@ -429,11 +501,24 @@ export class ContestDB {
   async pushToGitHub(force = false) {
     const status = (await this.ctx.storage.get('gh')) || {};
     const rev = this.contest.rev;
-    if (!force && status.lastPushRev === rev) return status;
     try {
-      const snap = this.contest.snapshot();
-      await this.gh.write(JSON.stringify(snap, null, 1), `Contest data · rev ${rev} · ${new Date().toISOString()}`);
-      Object.assign(status, { lastPushRev: rev, lastPushAt: Date.now(), lastError: null });
+      if (force || status.lastPushRev !== rev) {
+        const snap = { ...this.contest.snapshot(), org: this.orgId };
+        await this.gh.write(JSON.stringify(snap, null, 1), `${this.orgId === DEFAULT_ORG ? 'Contest data' : 'Org ' + this.orgId} · rev ${rev} · ${new Date().toISOString()}`);
+        Object.assign(status, { lastPushRev: rev, lastPushAt: Date.now(), lastError: null });
+      }
+      // Photos: each is written once (they never change). A few per run keeps within Cloudflare's per-run request limit.
+      const done = new Set((await this.ctx.storage.get('ghPhotos')) || []);
+      const want = this.contest.photoIds().filter(id => !done.has(id));
+      for (const id of want.slice(0, 10)) {
+        const rec = (await this.ctx.storage.get('photo:' + id));
+        if (rec?.data) await this.gh.at(this.photoDir + id).writeOnce(rec.data instanceof Uint8Array ? rec.data : new Uint8Array(rec.data), `Photo ${id}`);
+        done.add(id);
+      }
+      await this.ctx.storage.put('ghPhotos', [...done]);
+      status.photosPending = Math.max(0, want.length - 10);
+      status.photosBackedUp = this.contest.photoIds().filter(id => done.has(id)).length;
+      if (status.photosPending) await this.ctx.storage.setAlarm(Date.now() + 5000);
       await this.ctx.storage.put('gh', status);
       return status;
     } catch (e) {
@@ -443,30 +528,56 @@ export class ContestDB {
     }
   }
 
+  async photoFromBackup(id) {
+    if (!this.gitHubOn || !/^[\w-]+$/.test(id)) return null;
+    try {
+      const bytes = await this.gh.at(this.photoDir + id).readBytes();
+      if (!bytes) return null;
+      const type = bytes[0] === 0x89 ? 'image/png' : bytes[0] === 0x52 && bytes[8] === 0x57 ? 'image/webp' : 'image/jpeg';
+      const done = new Set((await this.ctx.storage.get('ghPhotos')) || []); done.add(id); await this.ctx.storage.put('ghPhotos', [...done]);
+      return { data: bytes, type };
+    } catch { return null; }
+  }
+
+  /** Replace this database with the latest backup (keeps people signed in). */
+  async restoreFromBackup(by) {
+    let snap;
+    try { snap = await this.gh.read(); } catch (e) { throw new HttpError(502, e.message); }
+    if (!snap) throw new HttpError(404, 'There is no backup for this organization yet');
+    if (snap.org && snap.org !== this.orgId) throw new HttpError(409, 'That backup belongs to a different organization');
+    await this.contest.importSnapshot(snap, { keepSessions: true });
+    this.contest.audit(by, 'data.restore', { label: `Restored from the backup saved ${snap.exportedAt}` });
+    await this.contest.save();
+    this.contest.broadcastFlags();
+    this.broadcast('rev', { rev: this.contest.rev });
+    await this.ctx.storage.put('gh', { ...((await this.ctx.storage.get('gh')) || {}), lastPushRev: null, restoredAt: Date.now() });
+    await this.scheduleFlush();
+    return snap.exportedAt;
+  }
+  async backupStatus() {
+    const st = (await this.ctx.storage.get('gh')) || {};
+    return { on: this.gitHubOn, lastPushAt: st.lastPushAt || null, lastError: st.lastError || null, lastErrorAt: st.lastErrorAt || null, upToDate: st.lastPushRev === this.contest.rev && !st.photosPending, photosPending: st.photosPending || 0, photos: this.contest.photoIds().length, restoredAt: st.restoredAt || null };
+  }
+
   async githubAdmin(req) {
     try {
       const admin = await this.contest.requireUser(req, 'admin');
-      const status = async () => ({ ...((await this.ctx.storage.get('gh')) || {}), rev: this.contest.rev, repo: this.gh.repo, path: this.gh.path, branch: this.gh.branch, configured: this.gitHubOn, flushSeconds: this.flushMs / 1000, local: !!this.env.LOCAL_MODE, managed: this.orgId !== DEFAULT_ORG });
+      const managed = this.orgId !== DEFAULT_ORG;
+      // Customers' admins see when they were last backed up, never where (that's Spotlight's private repo).
+      const status = async () => managed ? { managed: true, ...(await this.backupStatus()) }
+        : ({ ...((await this.ctx.storage.get('gh')) || {}), rev: this.contest.rev, repo: this.gh.repo, path: this.gh.path, branch: this.gh.branch, configured: this.gitHubOn, flushSeconds: this.flushMs / 1000, local: !!this.env.LOCAL_MODE, managed: false });
       if (req.method === 'GET') return json(200, await status());
       if (req.method !== 'POST') throw new HttpError(405, 'Method not allowed');
       const body = await req.json().catch(() => ({}));
       if (!this.gitHubOn) throw new HttpError(400, 'GitHub data repo is not configured on the Worker');
+      if (managed && body.action !== 'push') throw new HttpError(403, 'Ask Spotlight support to restore a backup');
       if (body.action === 'push') {
         try { await this.pushToGitHub(true); } catch (e) { throw new HttpError(502, e.message); }
         return json(200, await status());
       }
       if (body.action === 'restore') {
         if (body.confirm !== 'RESTORE') throw new HttpError(400, 'Confirmation text missing');
-        let snap;
-        try { snap = await this.gh.read(); } catch (e) { throw new HttpError(502, e.message); }
-        if (!snap) throw new HttpError(404, 'There is no data file in the GitHub repo yet');
-        await this.contest.importSnapshot(snap, { keepSessions: true });
-        this.contest.audit(admin, 'data.restore', { label: `Restored from GitHub (${this.gh.repo}/${this.gh.path}, saved ${snap.exportedAt})` });
-        await this.contest.save();
-        this.contest.broadcastFlags();
-        this.broadcast('rev', { rev: this.contest.rev });
-        await this.ctx.storage.put('gh', { ...((await this.ctx.storage.get('gh')) || {}), lastPushRev: null, restoredAt: Date.now() });
-        await this.scheduleFlush();
+        await this.restoreFromBackup(admin);
         return json(200, await status());
       }
       throw new HttpError(400, 'Unknown action');
