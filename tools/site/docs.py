@@ -21,6 +21,7 @@ body = '''
   </ul>
   <p>Contests are either <b>cosplay</b> (with a stage, running order, tech booth and emcee) or <b>makers</b> (judged entries, no stage).</p>
   <p>Everyone uses the same app at <a href="/app/">spotlight.drimworksprops.com/app</a>. What each person sees depends on their role in the contest they're working on.</p>
+  <p>If you work on more than one event, an <b>event picker</b> appears at the top: pick an event to see just its contests, or <b>All events</b>. Each device remembers your choice.</p>
 </section>
 
 <section id="signing-in">
@@ -36,8 +37,9 @@ body = '''
 
 <section id="roles">
   <h2>Roles</h2>
-  <p>Admins manage the whole organization. Everyone else gets a role in each contest they work on, and can have different roles in different contests.</p>
+  <p>Admins manage the whole organization. Everyone else gets a role for a whole <b>event</b> (covering every contest in it, including ones added later) or for single contests. A role for a single contest overrides their event role there.</p>
   <div class="role"><b>Admin</b><span>Everything: events, contests, accounts, backups. Admins see every contest.</span></div>
+  <div class="role"><b>Event admin</b><span>Runs one event: adds and archives its contests, manages its crew, and is a lead on every contest in it. Sees nothing of other events or organization-wide settings.</span></div>
   <div class="role"><b>Lead</b><span>Runs a contest: setup, criteria, sign-ups, results, score review, feedback and the audit log.</span></div>
   <div class="role"><b>Coordinator</b><span>Check-in and the stage: confirms who's here, runs the order, calls people on stage. Can't see scores.</span></div>
   <div class="role"><b>Judge</b><span>Scores entries. Sees only their own scores and their own ranking.</span></div>
@@ -179,6 +181,9 @@ body = '''
 
 <section id="accounts">
   <h2>Accounts and passwords</h2>
+  <h3>Event crew</h3>
+  <p>On the <b>Admin</b> page, open an event to see its <b>Crew</b>. Add an existing person or create a new one, choose their role for the whole event, and optionally an end date: after that day their access to the event stops working by itself. Only organization admins can make someone an event admin. Event admins manage the rest of their event's crew.</p>
+  <h3>Accounts</h3>
   <ul>
     <li>Admins create accounts on the <b>Admin</b> page with a temporary password, which the person changes at first sign-in.</li>
     <li>Add an email to an account, or let people add their own in the account menu, so they can reset a forgotten password themselves.</li>

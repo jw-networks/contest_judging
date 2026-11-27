@@ -166,12 +166,56 @@ function serverBase() {
 const serverNow = () => Date.now() + S.clockOffset;
 // ---------- contests: everything below works on the CURRENT contest
 const isAdmin = () => S.account?.user.role === 'admin';
-const roleIn = cid => isAdmin() ? 'admin' : (S.account?.user.contests || {})[cid] || null;
+// Roles: a role for a contest wins; otherwise a role for its event covers it (event admin = lead on every contest
+// in the event). Event roles can end on a date (u.events[eventId].until). The server applies the same rules.
+const evRoleOf = (u, eid) => {
+  const e = eid && (u?.events || {})[eid];
+  if (!e || (e.until && serverNow() > e.until)) return null;
+  const ev = S.data.events?.[eid];
+  return ev && !ev.deleted ? e.role : null;
+};
+const userRoleIn = (u, cid) => {
+  if (!u) return null;
+  if (u.role === 'admin') return 'admin';
+  const c = S.data.contests[cid];
+  if (!c || c.deleted) return null;
+  const r = (u.contests || {})[cid];
+  if (r) return r;
+  const er = evRoleOf(u, c.eventId);
+  return er === 'admin' ? 'lead' : er;
+};
+const crewRoleIn = (u, cid) => u.role === 'admin' ? ((u.contests || {})[cid] || null) : userRoleIn(u, cid); // org admins aren't "crew"
+const roleIn = cid => userRoleIn(S.account?.user, cid);
+const isEventAdmin = eid => isAdmin() || evRoleOf(S.account?.user, eid) === 'admin';
+const myAdminEvents = () => isAdmin() ? eventsList() : eventsList().filter(e => evRoleOf(S.account?.user, e.id) === 'admin');
+const canAdmin = () => isAdmin() || myAdminEvents().length > 0; // the Admin page: org admins, and event admins (for their events)
 const myContests = () => Object.values(S.data.contests)
-  .filter(c => !c.deleted && (isAdmin() || ((S.account?.user.contests || {})[c.id] && !c.archived && !eventOf(c)?.archived)))
+  .filter(c => !c.deleted && (isAdmin() || (roleIn(c.id) && ((!c.archived && !eventOf(c)?.archived) || isEventAdmin(c.eventId)))))
   .sort((a, b) => (!!a.archived - !!b.archived) || (eventOf(b)?.order ?? 0) - (eventOf(a)?.order ?? 0) || (a.order ?? 0) - (b.order ?? 0) || String(a.name).localeCompare(b.name));
+// ---------- the event picker: show one event's contests (or all). Remembered per account on this device.
+const evKey = () => 'cj-event-' + (S.account ? accKey(S.account.org, S.account.username) : '');
+const pickableEvents = () => eventsList().filter(e => !e.archived && (isEventAdmin(e.id) || myContests().some(c => c.eventId === e.id && !c.archived)));
+function eventFilter() {
+  let v = ui.eventFilter;
+  if (v == null) { try { v = localStorage.getItem(evKey()) || ''; } catch { v = ''; } }
+  return v && pickableEvents().some(e => e.id === v) ? v : '';
+}
+function setEventFilter(eid) {
+  ui.eventFilter = eid;
+  try { localStorage.setItem(evKey(), eid); } catch { /* private mode */ }
+  const c = S.data.contests[ui.contestId];
+  if (eid && c && c.eventId !== eid) {
+    const first = myContests().find(x => !x.archived && x.eventId === eid);
+    ui.contestId = first?.id || null;
+    if (first && S.account) localStorage.setItem('cj-contest-' + accKey(S.account.org, S.account.username), first.id);
+    ui.judgeSel = null; ui.ci = { q: '', filter: 'all', division: 'all' };
+  }
+  if (route().name !== 'admin') location.hash = '#/' + home();
+  render();
+}
 function curId() {
-  const list = myContests().filter(c => !c.archived);
+  const ef = eventFilter();
+  const list = myContests().filter(c => !c.archived && (!ef || c.eventId === ef));
   const saved = S.account && localStorage.getItem('cj-contest-' + accKey(S.account.org, S.account.username));
   if (ui.contestId && list.some(c => c.id === ui.contestId)) return ui.contestId;
   if (saved && list.some(c => c.id === saved)) return (ui.contestId = saved);
@@ -197,7 +241,7 @@ const inCur = r => r.contestId === curId();
 const criteria = () => Object.values(S.data.criteria).filter(c => !c.deleted && inCur(c)).sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
 const participants = () => Object.values(S.data.participants).filter(p => !p.deleted && !p.hidden && inCur(p));
 const stage = () => S.data.stage[curId()] || { id: curId(), contestId: curId(), state: 'idle', participantId: null, nextParticipantId: null, durationMs: settings().stageSeconds * 1000, remainingMs: settings().stageSeconds * 1000, startedAt: null };
-const judges = () => Object.values(S.data.users).filter(u => (u.contests || {})[curId()] === 'judge');
+const judges = () => Object.values(S.data.users).filter(u => crewRoleIn(u, curId()) === 'judge');
 const userName = id => S.data.users[id]?.displayName || (S.account?.user.id === id ? S.account.user.displayName : 'Unknown user');
 const WORDS = () => isMakers()
   ? { one: 'entry', many: 'entries', One: 'Entry', Many: 'Entries', division: 'Category', divisions: 'Categories' }
@@ -358,7 +402,7 @@ async function sync({ full = false } = {}) {
     }
     for (const { coll, rec } of res.changes) applyServerRecord(coll, rec);
     S.rev = res.rev;
-    const access = u => JSON.stringify([u.role, Object.entries(u.contests || {}).sort()]);
+    const access = u => JSON.stringify([u.role, Object.entries(u.contests || {}).sort(), Object.entries(u.events || {}).sort()]);
     const accessChanged = access(S.account.user) !== access(res.user);
     const schemaChanged = !full && hadData && S.schema !== res.schema; // e.g. data cached before multi-contest support
     S.schema = res.schema;
@@ -551,9 +595,9 @@ const ROUTES = {
   platform: { title: 'Spotlight platform', short: 'Platform', icon: 'globe', global: true, platform: true, view: viewPlatform },
 };
 const TABS_MAX = 4; // bottom bar on phones: first 4 screens, the rest under "More"
-function routeAllowed(v) { return v.platform ? !!S.account?.user.platform : v.global ? isAdmin() : (!!curId() && v.roles.includes(role()) && !(v.cosplay && isMakers())); }
+function routeAllowed(v) { return v.platform ? !!S.account?.user.platform : v.global ? canAdmin() : (!!curId() && v.roles.includes(role()) && !(v.cosplay && isMakers())); }
 function home() {
-  if (!curId()) return S.account?.user.platform && !Object.keys(S.data.contests).length ? 'platform' : isAdmin() ? 'admin' : 'none';
+  if (!curId()) return S.account?.user.platform && !Object.keys(S.data.contests).length ? 'platform' : canAdmin() ? 'admin' : 'none';
   const r = role();
   if ((r === 'tech' || r === 'emcee') && isMakers()) return 'none';
   return { admin: 'results', lead: 'results', viewer: 'results', coordinator: 'checkin', judge: 'judge', tech: 'tech', emcee: 'emcee' }[r] || 'none';
@@ -626,9 +670,12 @@ function render() {
 
   let view = $('#view');
   // The contest picker only exists for people who can open two or more contests.
-  const openable = myContests().filter(c => !c.archived);
+  const ef = eventFilter();
+  const evChoices = pickableEvents();
+  const evSwitch = evChoices.length > 1;
+  const openable = myContests().filter(c => !c.archived && (!ef || c.eventId === ef));
   const switchable = openable.length > 1;
-  const shellKey = `${isAdmin()}|${role()}|${curId()}|${switchable}|${!!S.account.support}`;
+  const shellKey = `${isAdmin()}|${canAdmin()}|${role()}|${curId()}|${switchable}|${evSwitch}|${ef}|${!!S.account.support}`;
   if (!view || app.dataset.shell !== shellKey) {
     app.dataset.shell = shellKey;
     document.body.classList.toggle('multi-contest', switchable);
@@ -636,6 +683,10 @@ function render() {
       h('header.topbar',
         h('div.brand', h('img', { src: 'icons/icon.svg', alt: '' }),
           h('div.grow.brand-text', h('span.kicker#brand-kicker', APP_NAME), h('span#ev-name', settings().name))),
+        evSwitch ? h('label.contest-pick.event-pick', h('span.kicker', 'Event'), h('select#epick', {
+          title: 'Show one event, or all of them',
+          onchange: e => setEventFilter(e.target.value),
+        })) : null,
         switchable ? h('label.contest-pick', h('span.kicker', 'Contest'), h('select#cpick', {
           title: 'Switch contest',
           onchange: e => { const v = e.target.value; if (v === '__new__') { e.target.value = curId(); location.hash = '#/admin'; } else setContest(v); },
@@ -650,6 +701,11 @@ function render() {
       h('nav.tabbar#tabbar')].filter(Boolean));
     view = $('#view');
   }
+  if (evSwitch) {
+    $('#epick').replaceChildren(...evChoices.map(e => h('option', { value: e.id, selected: e.id === ef }, e.name || 'Unnamed event')),
+      h('option', { value: '', selected: !ef }, 'All events'));
+    fitSelect($('#epick'));
+  }
   if (switchable) {
     // Contest name lives in the picker; the brand shows the event (or just the app name).
     $('#brand-kicker').textContent = eventName() ? APP_NAME : '';
@@ -661,10 +717,10 @@ function render() {
     $('#cpick').replaceChildren(...(evIds.length > 1
       ? evIds.map(eid => h('optgroup', { label: S.data.events?.[eid]?.name || 'Unnamed event' }, openable.filter(c => (c.eventId || '') === eid).map(opt)))
       : openable.map(opt)),
-      ...(isAdmin() ? [h('option', { value: '__new__' }, '＋ New contest…')] : []));
+      ...(isAdmin() || (ef && isEventAdmin(ef)) ? [h('option', { value: '__new__' }, '＋ New contest…')] : []));
     fitSelect($('#cpick'));
   } else {
-    $('#ev-name').textContent = curId() ? settings().name : (isAdmin() ? 'No contests yet' : APP_NAME);
+    $('#ev-name').textContent = curId() ? settings().name : (canAdmin() ? (ef ? 'No contests in this event yet' : 'No contests yet') : APP_NAME);
     $('#brand-kicker').textContent = eventName() ? `${APP_NAME} · ${eventName()}` : APP_NAME;
     $('#brand-kicker').classList.remove('hidden');
   }
@@ -675,7 +731,7 @@ function render() {
   const contestTabs = allowed.filter(([k]) => k !== 'admin' && k !== 'platform');
   $('#nav').replaceChildren(...contestTabs.map(([k, v]) => h('a', { href: '#/' + k, class: k === r.name ? 'active' : '', title: v.title }, v.short)),
     ...(monitorLink ? [h('a.nav-icon', { href: monHref, target: '_blank', title: 'Open the confidence monitor in a new window', 'aria-label': 'Monitor' }, icon('monitor'))] : []),
-    ...(isAdmin() ? [h('a.nav-icon', { href: '#/admin', class: r.name === 'admin' ? 'active' : '', title: 'Admin: contests, accounts, GitHub copy', 'aria-label': 'Admin' }, icon('admin'))] : []),
+    ...(canAdmin() ? [h('a.nav-icon', { href: '#/admin', class: r.name === 'admin' ? 'active' : '', title: isAdmin() ? 'Admin: events, contests, accounts, backups' : 'Admin: your event\'s contests and crew', 'aria-label': 'Admin' }, icon('admin'))] : []),
     ...(S.account.user.platform ? [h('a.nav-icon', { href: '#/platform', class: r.name === 'platform' ? 'active' : '', title: 'Spotlight platform: organizations', 'aria-label': 'Platform' }, icon('globe'))] : []));
   // Phones / portrait tablets: bottom tabs. One-screen roles (judges) get none.
   const entries = [...allowed.map(([k, v]) => ({ k, ...v })), ...(monitorLink ? [{ k: 'monitor/' + curId(), href: monHref, short: 'Monitor', title: 'Monitor', icon: 'monitor', ext: true }] : [])];
@@ -790,7 +846,7 @@ function accountMenu() {
         catch (e) { toast(e.status ? e.message : 'You need to be online to change your password', 'bad'); }
       },
     }, 'Change password')),
-  [isAdmin() ? h('a.btn.ghost', { href: '#/admin', onclick: () => close() }, icon('admin'), 'Admin page') : null,
+  [canAdmin() ? h('a.btn.ghost', { href: '#/admin', onclick: () => close() }, icon('admin'), 'Admin page') : null,
     h('button.btn.ghost', { title: 'Sign someone else in on this tab. You stay signed in elsewhere.', onclick: () => { close(); switchPerson(); } }, 'Switch person'),
     h('button.btn.danger', { onclick: () => { close(); logout(); } }, 'Sign out')]);
 }
@@ -2164,7 +2220,7 @@ function viewSetup() {
   const ed = ui.eventDraft;
   const keep = k => e => { ed[k] = e.target.value; };
   const name = h('input', { type: 'text', value: ed.name ?? (st.name || ''), oninput: keep('name') });
-  const type = h('select', { onchange: keep('type'), disabled: !isAdmin() }, Object.entries(TYPE_INFO).map(([k, v]) => h('option', { value: k, selected: (ed.type ?? st.type) === k }, `${v.label} — ${v.hint}`)));
+  const type = h('select', { onchange: keep('type'), disabled: !isEventAdmin(st.eventId) }, Object.entries(TYPE_INFO).map(([k, v]) => h('option', { value: k, selected: (ed.type ?? st.type) === k }, `${v.label} — ${v.hint}`)));
   const secs = h('input', { type: 'number', min: 5, value: ed.secs ?? st.stageSeconds, oninput: keep('secs') });
   const warn = h('input', { type: 'number', min: 0, value: ed.warn ?? st.warnSeconds, oninput: keep('warn') });
   const divs = h('input', { type: 'text', value: ed.divs ?? (st.divisions || []).join(', '), oninput: keep('divs') });
@@ -2180,7 +2236,7 @@ function viewSetup() {
     h('div.panel.stack', h('h3', 'Contest'),
       h('div.form-grid',
         h('label.field', h('span', 'Contest name'), name),
-        h('label.field', h('span', 'Type' + (isAdmin() ? '' : ' (set by an admin)')), type)),
+        h('label.field', h('span', 'Type' + (isEventAdmin(st.eventId) ? '' : ' (set by an admin)')), type)),
       isMakers() ? null : h('div.form-grid',
         h('label.field', h('span', 'Stage time per contestant (seconds)'), secs),
         h('label.field', h('span', 'Warning when this many seconds remain'), warn)),
@@ -2203,7 +2259,7 @@ function viewSetup() {
             heatSize: Math.max(1, Math.min(500, Math.round(Number(hsize.value) || 14))), walkUps: Math.max(0, Math.min(100, Math.round(Number(walks.value) || 0))) };
           if (patch.heats < (st.heats || 0) && participants().some(p => p.heat > patch.heats) && !confirm(`Some entries are in heats above ${patch.heats}. They will show as "No heat" until you move them. Continue?`)) return;
           if (!isMakers()) Object.assign(patch, { stageSeconds: Number(secs.value) || 90, warnSeconds: Number(warn.value) || 0 });
-          if (isAdmin() && type.value !== st.type) {
+          if (isEventAdmin(st.eventId) && type.value !== st.type) {
             if (!confirm(`Switch this contest to ${TYPE_INFO[type.value].label}? Existing ${W.many} and scores are kept; the screens and wording change.`)) return;
             patch.type = type.value;
           }
@@ -2432,10 +2488,13 @@ function afterEventPanel(cid, online) {
 /** Who can see this contest, and as what. Admins manage everyone; leads manage judges, coordinators and viewers. */
 function accessPanel(cid, online) {
   const ROLE_NOTE = { lead: 'runs this contest', coordinator: 'check-in & stage', judge: 'scores', viewer: 'read-only results', tech: 'sound & lighting cues', emcee: 'MC intros' };
-  const grantable = (isAdmin() ? ['judge', 'coordinator', 'lead', 'viewer', 'tech', 'emcee'] : ['judge', 'coordinator', 'viewer', 'tech', 'emcee'])
+  const full = isEventAdmin(S.data.contests[cid]?.eventId); // org admins and this event's admins can manage leads
+  const grantable = (full ? ['judge', 'coordinator', 'lead', 'viewer', 'tech', 'emcee'] : ['judge', 'coordinator', 'viewer', 'tech', 'emcee'])
     .filter(r => !(isMakers() && (r === 'tech' || r === 'emcee'))); // no stage in makers contests
   const everyone = Object.values(S.data.users).sort((a, b) => a.displayName.localeCompare(b.displayName));
   const members = everyone.filter(u => u.role !== 'admin' && (u.contests || {})[cid]);
+  // People who work here through a role for the whole event (changed on the Admin page, under the event's crew).
+  const viaEvent = everyone.filter(u => u.role !== 'admin' && !(u.contests || {})[cid] && crewRoleIn(u, cid));
   const admins = everyone.filter(u => u.role === 'admin' && u.active);
   const cap = r => r[0].toUpperCase() + r.slice(1);
   const roleSelect = (value, onchange, roles = grantable) => h('select.role-select', { disabled: !online, onchange },
@@ -2481,7 +2540,7 @@ function accessPanel(cid, online) {
 
   const rows = members.map(u => {
     const r = u.contests[cid];
-    const locked = !isAdmin() && r === 'lead'; // leads can't change or remove leads (including themselves)
+    const locked = !full && r === 'lead'; // leads can't change or remove leads (including themselves)
     return h('div.item.access-row', { style: { cursor: 'default', opacity: u.active ? 1 : .5 } },
       h('div.who', h('div.n', u.displayName, u.id === S.account.user.id ? h('span.badge', { style: { marginLeft: '6px' } }, 'you') : null,
         u.active ? null : h('span.badge.no_show', { style: { marginLeft: '6px' } }, 'disabled')), h('div.c', u.username)),
@@ -2492,10 +2551,16 @@ function accessPanel(cid, online) {
   return h('div.panel.stack', h('div.row.between', h('h3', 'Who has access'), online ? null : h('span.badge.draft', 'Needs connection')),
     h('div.access-add', pick, pickRole, addBtn),
     newForm,
-    h('p.small.muted', isAdmin()
-      ? 'Pick an existing account or "New person…". Use the Admin page to give someone roles in several contests at once.'
+    h('p.small.muted', full
+      ? 'Pick an existing account or "New person…". To give someone a role across a whole event, use the event\'s crew on the Admin page.'
       : 'Add judges, coordinators and viewers to this contest, or create a new person. Only admins can add or change leads.'),
-    rows.length ? h('div.list', rows) : h('p.muted', 'Nobody has been added to this contest yet.'),
+    rows.length ? h('div.list', rows) : h('p.muted', viaEvent.length ? 'Nobody has been added to just this contest.' : 'Nobody has been added to this contest yet.'),
+    viaEvent.length ? h('div.stack',
+      h('h3', `Through ${eventOf(S.data.contests[cid])?.name || 'the event'}`),
+      h('p.small.muted', 'These people have a role for the whole event, so they work on every contest in it. ' + (full ? 'Change their event role on the Admin page, or give them a different role for just this contest above.' : 'Event roles are changed by an admin.')),
+      h('div.list', viaEvent.map(u => { const er = evRoleOf(u, S.data.contests[cid].eventId); return h('div.item.access-row', { style: { cursor: 'default', opacity: u.active ? 1 : .5 } },
+        h('div.who', h('div.n', u.displayName), h('div.c', u.username)),
+        h('span.badge', er === 'admin' ? 'Event admin (lead here)' : `${cap(er)} for the event`)); }))) : null,
     admins.length ? h('p.small.muted', `Admins always have full access: ${admins.map(u => u.displayName).join(', ')}.`) : null);
 }
 
@@ -2990,11 +3055,26 @@ function viewPlatform() {
 // ============================================================ admin (account-wide)
 function viewAdmin() {
   const online = S.net === 'online';
+  const ef = eventFilter();
+  if (!isAdmin()) {
+    // Event admins: their event(s) only. Nothing organization-wide.
+    const evs = myAdminEvents().filter(e => !ef || e.id === ef);
+    return h('div.stack',
+      h('div.panel', h('span.kicker', evs.length === 1 ? 'Your event' : 'Your events'),
+        h('p.small.muted', { style: { margin: '.3rem 0 0' } }, 'You\'re an event admin: you manage these events\' contests and crew, and you\'re a lead on every contest in them.')),
+      eventsPanel(evs),
+      contestsPanel(evs),
+      ...evs.map(e => eventCrewPanel(e, online)));
+  }
+  const evF = ef ? S.data.events[ef] : null;
   return h('div.stack',
+    evF ? h('div.banner', h('span.tag', 'Event'), h('span.grow', `Showing ${evF.name || 'one event'}. Accounts, backups and transfers below are for the whole organization.`),
+      h('button.btn.sm', { onclick: () => setEventFilter('') }, 'Show all events')) : null,
     eventsPanel(),
-    contestsPanel(),
+    contestsPanel(evF ? [evF] : null),
+    evF ? eventCrewPanel(evF, online) : null,
     h('div.panel.stack', h('div.row.between', h('h3', 'Accounts'), online ? null : h('span.badge.draft', 'Needs connection')),
-      h('p.small.muted', 'Each account gets a role per contest, or is an admin who sees and manages everything. New accounts and password resets must choose their own password at first sign-in.'),
+      h('p.small.muted', 'Each account gets roles for whole events or single contests, or is an admin who sees and manages everything. New accounts and password resets must choose their own password at first sign-in.'),
       accountsPanel(online)),
     githubPanel(online),
     CFG.local ? null : localDownloadPanel(),
@@ -3114,8 +3194,9 @@ async function loadTransferFile(fileObj) {
   };
 }
 
-function eventsPanel() {
-  const evs = eventsList();
+function eventsPanel(only) {
+  const org = !only; // org admins: all events, create/archive/delete. Event admins: rename their own.
+  const evs = only || eventsList();
   const d = ui.newEvent ||= { name: '' };
   const name = h('input', { type: 'text', placeholder: 'e.g. Halo Fest 2027', value: d.name, oninput: e => { d.name = e.target.value; } });
   const n = e => Object.values(S.data.contests).filter(c => c.eventId === e.id && !c.deleted).length;
@@ -3125,13 +3206,14 @@ function eventsPanel() {
       h('div.who', h('input.event-name', { type: 'text', value: e.name, placeholder: 'Name this event, e.g. Halo Fest 2026', 'aria-label': 'Event name',
         onchange: ev => { const v = ev.target.value.trim(); if (v !== e.name) { mutate('events', e.id, { name: v }); toast(v ? 'Event renamed' : 'Event name cleared', 'ok'); } } }),
         h('div.c', `${n(e)} contest${n(e) === 1 ? '' : 's'}`, e.archived ? ' · archived' : '')),
-      h('button.btn.sm.ghost', { onclick: () => {
+      org && pickableEvents().length > 1 && eventFilter() !== e.id && !e.archived ? h('button.btn.sm', { title: 'Show just this event: its contests and crew', onclick: () => setEventFilter(e.id) }, 'Open') : null,
+      org ? h('button.btn.sm.ghost', { onclick: () => {
         if (!e.archived && !confirm(`Archive "${e.name || 'this event'}"? Its contests disappear for everyone except admins. Nothing is deleted, and you can restore it any time.`)) return;
         mutate('events', e.id, { archived: !e.archived });
-      } }, e.archived ? 'Restore' : 'Archive'),
-      !n(e) && evs.length > 1 ? h('button.btn.sm.ghost', { onclick: () => { if (confirm(`Delete the empty event "${e.name || 'unnamed'}"?`)) mutate('events', e.id, { deleted: true }); } }, 'Delete') : null)))
+      } }, e.archived ? 'Restore' : 'Archive') : null,
+      org && !n(e) && evs.length > 1 ? h('button.btn.sm.ghost', { onclick: () => { if (confirm(`Delete the empty event "${e.name || 'unnamed'}"?`)) mutate('events', e.id, { deleted: true }); } }, 'Delete') : null)))
       : h('p.muted', 'No events yet.'),
-    h('div.row', h('div.grow', name), h('button.btn.primary', { onclick: () => {
+    !org ? null : h('div.row', h('div.grow', name), h('button.btn.primary', { onclick: () => {
       const nm = name.value.trim();
       if (!nm) return toast('Give the event a name', 'bad');
       const id = newId();
@@ -3141,16 +3223,72 @@ function eventsPanel() {
     } }, icon('plus'), 'New event')));
 }
 
-function contestsPanel() {
-  const evs = eventsList();
-  const all = Object.values(S.data.contests).filter(c => !c.deleted).sort((a, b) => (evs.indexOf(eventOf(a)) - evs.indexOf(eventOf(b))) || (!!a.archived - !!b.archived) || (a.order ?? 0) - (b.order ?? 0));
+// An event's crew: people with a role for the whole event (org admins and that event's admins manage it).
+function eventCrewPanel(e, online) {
+  const orgAdmin = isAdmin();
+  const post = (path, body) => api(`/api/events/${encodeURIComponent(e.id)}/${path}`, body, { token: S.account.token });
+  const done = msg => { toast(msg, 'ok'); sync(); };
+  const fail = x => { toast(x.status ? x.message : 'You need to be online to change the crew', 'bad'); render(); };
+  const everyone = Object.values(S.data.users).filter(u => u.role !== 'admin').sort((a, b) => a.displayName.localeCompare(b.displayName));
+  const crew = everyone.filter(u => (u.events || {})[e.id]);
+  const evContests = Object.values(S.data.contests).filter(c => c.eventId === e.id && !c.deleted);
+  const singles = everyone.filter(u => !(u.events || {})[e.id] && evContests.some(c => (u.contests || {})[c.id]));
+  const rows = crew.map(u => {
+    const cur = u.events[e.id], ended = cur.until && serverNow() > cur.until;
+    const locked = !orgAdmin && cur.role === 'admin'; // only org admins change event admins
+    const rs = eventRoleSelect(cur.role, { withAdmin: orgAdmin || cur.role === 'admin', noneLabel: null, disabled: !online || locked });
+    const until = h('input', { type: 'date', value: dayInput(cur.until), disabled: !online || locked, title: 'Optional: the role stops working after this day' });
+    const save = () => post('members', { userId: u.id, role: rs.value, until: endOfDay(until.value) }).then(() => done(`${u.displayName}: ${rs.value === 'admin' ? 'event admin' : rs.value}${until.value ? ` until ${fmtDay(endOfDay(until.value))}` : ''}`), fail);
+    rs.onchange = save; until.onchange = save;
+    return h('div.item.access-row.crew-row', { style: { cursor: 'default', opacity: u.active && !ended ? 1 : .55 } },
+      h('div.who', h('div.n', u.displayName, u.id === S.account.user.id ? h('span.badge', { style: { marginLeft: '6px' } }, 'you') : null,
+        ended ? h('span.badge.no_show', { style: { marginLeft: '6px' } }, 'ended') : null, u.active ? null : h('span.badge.no_show', { style: { marginLeft: '6px' } }, 'disabled')),
+        h('div.c', u.username, u.email ? ` · ${u.email}` : '')),
+      rs, h('label.until', h('span.small.muted', 'until'), until),
+      locked ? null : h('button.btn.sm.danger', { disabled: !online, onclick: () => { if (confirm(`Remove ${u.displayName} from ${e.name || 'this event'}? Their scores are kept.`)) post('members', { userId: u.id, role: null }).then(() => done(`${u.displayName} removed from ${e.name || 'the event'}`), fail); } }, 'Remove'));
+  });
+  // Add someone: an existing account, or a new one.
+  const NEW = '__new__';
+  const pick = h('select', { disabled: !online }, h('option', { value: '' }, online ? 'Loading people…' : 'Connect to add people'));
+  const role = eventRoleSelect('judge', { withAdmin: orgAdmin, noneLabel: null });
+  const until = h('input', { type: 'date', title: 'Optional: the role stops working after this day' });
+  const nf = { displayName: h('input', { type: 'text', placeholder: 'Display name' }), username: h('input', { type: 'text', placeholder: 'username', autocapitalize: 'none', autocomplete: 'off' }),
+    password: h('input', { type: 'text', placeholder: 'Temporary password (8+)', autocomplete: 'off' }), email: h('input', { type: 'email', placeholder: 'Email (optional)' }) };
+  const newForm = h('div.form-grid.hidden', nf.displayName, nf.username, nf.password, nf.email);
+  pick.addEventListener('change', () => newForm.classList.toggle('hidden', pick.value !== NEW));
+  if (online) post('candidates').then(r => pick.replaceChildren(
+    h('option', { value: '' }, r.candidates.length ? 'Choose a person…' : 'No one else yet: create a new person'),
+    ...r.candidates.map(u => h('option', { value: u.id }, `${u.displayName} (${u.username})`)), h('option', { value: NEW }, '＋ New person…'))).catch(() => pick.replaceChildren(h('option', { value: '' }, 'Couldn\'t load people')));
+  const add = h('button.btn.primary', { disabled: !online, onclick: async () => {
+    const r = role.value, u8 = endOfDay(until.value), what = `${r === 'admin' ? 'event admin' : r}${u8 ? ` until ${fmtDay(u8)}` : ''}`;
+    if (pick.value === NEW) {
+      try { await post('accounts', { displayName: nf.displayName.value.trim(), username: nf.username.value.trim(), password: nf.password.value, email: nf.email.value.trim(), role: r, until: u8 });
+        done(`Created ${nf.displayName.value.trim() || nf.username.value.trim()} as ${what}. Give them the username and temporary password; they'll choose their own at first sign-in.`); } catch (x) { fail(x); }
+      return;
+    }
+    if (!pick.value) return toast('Choose a person first', 'bad');
+    const label = pick.selectedOptions[0].textContent.replace(/ \(.*\)$/, '');
+    post('members', { userId: pick.value, role: r, until: u8 }).then(() => done(`${label} added as ${what}`), fail);
+  } }, icon('plus'), 'Add');
+  return h('div.panel.stack', h('div.row.between', h('h3', `Crew: ${e.name || 'unnamed event'}`), online ? null : h('span.badge.draft', 'Needs connection')),
+    h('p.small.muted', 'A role here covers every contest in the event, including ones added later. A role for a single contest (in that contest\'s Setup) overrides it there.' + (orgAdmin ? ' Event admins run the event: its contests, crew and sign-ups.' : '')),
+    h('div.access-add.crew-add', pick, role, h('label.until', h('span.small.muted', 'until'), until), add),
+    newForm,
+    rows.length ? h('div.list', rows) : h('p.muted', 'Nobody has a role for this whole event yet.'),
+    singles.length ? h('p.small.muted', 'Also working on single contests in this event: ', singles.map(u => `${u.displayName} (${evContests.filter(c => (u.contests || {})[c.id]).map(c => `${c.name}: ${u.contests[c.id]}`).join(', ')})`).join('; '), '.') : null);
+}
+
+function contestsPanel(onlyEvents) {
+  const evs = onlyEvents || eventsList();
+  const inEvs = c => !onlyEvents || onlyEvents.some(e => e.id === c.eventId);
+  const all = Object.values(S.data.contests).filter(c => !c.deleted && inEvs(c)).sort((a, b) => (evs.indexOf(eventOf(a)) - evs.indexOf(eventOf(b))) || (!!a.archived - !!b.archived) || (a.order ?? 0) - (b.order ?? 0));
   const d = ui.newContest ||= { name: '', type: 'cosplay' };
-  if (!d.eventId || !S.data.events?.[d.eventId] || S.data.events[d.eventId].deleted) d.eventId = newestEventId();
+  if (!d.eventId || !evs.some(e => e.id === d.eventId)) d.eventId = (evs.find(e => !e.archived) || evs[0])?.id || newestEventId();
   const evPick = h('select', { onchange: e => { d.eventId = e.target.value; } }, evs.map(e => h('option', { value: e.id, selected: d.eventId === e.id }, (e.name || 'Unnamed event') + (e.archived ? ' (archived)' : ''))));
   const name = h('input', { type: 'text', placeholder: 'Contest name, e.g. Saturday Masquerade', value: d.name, oninput: e => { d.name = e.target.value; } });
   const type = h('select', { onchange: e => { d.type = e.target.value; } }, Object.entries(TYPE_INFO).map(([k, v]) => h('option', { value: k, selected: d.type === k }, `${v.label} — ${v.hint}`)));
   const count = (coll, c, f = () => true) => Object.values(S.data[coll]).filter(x => x.contestId === c.id && !x.deleted && f(x)).length;
-  const people = (c, r) => Object.values(S.data.users).filter(u => (u.contests || {})[c.id] === r).length;
+  const people = (c, r) => Object.values(S.data.users).filter(u => crewRoleIn(u, c.id) === r).length;
   return h('div.panel.stack', h('h3', 'Contests'),
     all.length ? h('div.table-wrap', h('table',
       h('thead', h('tr', h('th', 'Contest'), h('th', 'Type'), h('th.r', 'Entries'), h('th.r', 'Judges'), h('th.r', 'Leads'), h('th', ''))),
@@ -3163,8 +3301,8 @@ function contestsPanel() {
         h('td.r', people(c, 'judge')),
         h('td.r', people(c, 'lead')),
         h('td', h('div.row', { style: { justifyContent: 'flex-end', flexWrap: 'nowrap' } },
-          evs.length > 1 ? h('select.move-event', { title: 'Move to another event', onchange: e => { mutate('contests', c.id, { eventId: e.target.value }); toast(`Moved ${c.name}`, 'ok'); } },
-            evs.map(e => h('option', { value: e.id, selected: c.eventId === e.id }, e.name || 'Unnamed event'))) : null,
+          isAdmin() && eventsList().length > 1 ? h('select.move-event', { title: 'Move to another event', onchange: e => { mutate('contests', c.id, { eventId: e.target.value }); toast(`Moved ${c.name}`, 'ok'); } },
+            eventsList().map(e => h('option', { value: e.id, selected: c.eventId === e.id }, e.name || 'Unnamed event'))) : null,
           c.archived ? null : h('button.btn.sm', { onclick: () => setContest(c.id) }, 'Open'),
           h('button.btn.sm.ghost', {
             onclick: () => {
@@ -3196,8 +3334,11 @@ function accountsPanel(online) {
     try { await fn(); toast(okMsg, 'ok'); sync(); } catch (e) { toast(e.status ? e.message : 'You need to be online to manage accounts', 'bad'); }
   };
   const access = u => u.role === 'admin' ? [h('span.badge.checked_in', 'admin · all contests')]
-    : Object.entries(u.contests || {}).filter(([cid]) => S.data.contests[cid] && !S.data.contests[cid].deleted)
-      .map(([cid, r]) => h('span.badge', { style: { marginRight: '4px' } }, `${S.data.contests[cid].name}: ${r}`));
+    : [...Object.entries(u.events || {}).filter(([eid]) => S.data.events?.[eid] && !S.data.events[eid].deleted)
+        .map(([eid, e]) => { const ended = e.until && serverNow() > e.until; return h('span.badge', { class: ended ? 'no_show' : 'checked_in', style: { marginRight: '4px' }, title: ended ? 'This event role has ended' : '' },
+          `${S.data.events[eid].name || 'Unnamed event'}: ${e.role === 'admin' ? 'event admin' : e.role}${e.until ? (ended ? ' (ended)' : ` until ${fmtDay(e.until)}`) : ''}`); }),
+      ...Object.entries(u.contests || {}).filter(([cid]) => S.data.contests[cid] && !S.data.contests[cid].deleted)
+        .map(([cid, r]) => h('span.badge', { style: { marginRight: '4px' } }, `${S.data.contests[cid].name}: ${r}`))];
   const d = ui.newUser;
   const keep = k => e => { d[k] = e.target.value; };
   const nu = {
@@ -3233,24 +3374,43 @@ function accountsPanel(online) {
     }, icon('plus'), 'Create account')));
 }
 
+// Event roles: a <select> and an optional end date ("until"), stored as the end of that day on this device's clock.
+const EVENT_ROLE_LABELS = { admin: 'Event admin: runs the whole event', lead: 'Lead on every contest', coordinator: 'Coordinator (check-in & stage)', judge: 'Judge', viewer: 'Viewer (read-only results)', tech: 'Tech booth', emcee: 'Emcee' };
+const fmtDay = t => new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+const dayInput = t => { if (!t) return ''; const d = new Date(t); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+const endOfDay = v => v ? new Date(v + 'T23:59:59').getTime() : null;
+function eventRoleSelect(value, { withAdmin, noneLabel = 'No event role', disabled } = {}) {
+  return h('select', { disabled }, noneLabel ? h('option', { value: '' }, noneLabel) : null,
+    Object.entries(EVENT_ROLE_LABELS).filter(([k]) => withAdmin || k !== 'admin').map(([k, v]) => h('option', { value: k, selected: value === k }, v)));
+}
 function editAccess(u, contests, call) {
   const admin = h('input', { type: 'checkbox', checked: u.role === 'admin', disabled: u.id === S.account.user.id });
   const email = h('input', { type: 'email', value: u.email || '', placeholder: 'Email (optional, for password resets)' });
+  const evSel = {}, evUntil = {};
+  const evRows = eventsList().map(e => { const cur = (u.events || {})[e.id]; return h('div.ev-role-row',
+    h('b', e.name || 'Unnamed event', e.archived ? h('span.small.muted', ' (archived)') : null),
+    evSel[e.id] = eventRoleSelect(cur?.role, { withAdmin: true }),
+    h('label.until', h('span.small.muted', 'until'), evUntil[e.id] = h('input', { type: 'date', value: dayInput(cur?.until), title: 'Optional: the role stops working after this day' }))); });
   const sel = {};
   const rows = contests.map(c => h('label.field', h('span', c.name + (c.archived ? ' (archived)' : '')),
     sel[c.id] = h('select', h('option', { value: '' }, 'No access'), ['lead', 'coordinator', 'judge', 'viewer', ...(c.type === 'makers' ? [] : ['tech', 'emcee'])].map(r => h('option', { value: r, selected: (u.contests || {})[c.id] === r }, r)))));
   const close = openModal(`Access · ${u.displayName}`, h('div.stack',
     h('label.field', h('span', 'Email'), email),
     h('label.check', admin, 'Admin — sees and manages every contest and all accounts'),
-    h('p.small.muted', 'Per-contest roles (ignored while Admin is ticked):'),
+    evRows.length ? h('div.stack', h('h3', 'Event roles'),
+      h('p.small.muted', 'A role for an event covers every contest in it, including ones added later. Add an end date to have it stop working after the show. (Ignored while Admin is ticked.)'),
+      h('div.ev-roles', evRows)) : null,
+    h('h3', 'Single contests'),
+    h('p.small.muted', 'A role for one contest overrides their event role there. (Ignored while Admin is ticked.)'),
     contests.length ? h('div.form-grid', rows) : h('p.muted', 'No contests yet.')),
   [
     h('button.btn.ghost', { onclick: () => close() }, 'Cancel'),
     h('button.btn.primary', {
       onclick: () => {
         const map = {}; for (const c of contests) map[c.id] = sel[c.id].value || null;
+        const events = {}; for (const e of eventsList()) events[e.id] = evSel[e.id].value ? { role: evSel[e.id].value, until: endOfDay(evUntil[e.id].value) } : null;
         close();
-        call(() => api('/api/users/' + u.id, { role: admin.checked ? 'admin' : 'member', contests: map, ...(email.value.trim() !== (u.email || '') ? { email: email.value.trim() } : {}) }, { method: 'PATCH', token: S.account.token }), 'Access updated');
+        call(() => api('/api/users/' + u.id, { role: admin.checked ? 'admin' : 'member', contests: map, events, ...(email.value.trim() !== (u.email || '') ? { email: email.value.trim() } : {}) }, { method: 'PATCH', token: S.account.token }), 'Access updated');
       },
     }, 'Save access'),
   ]);

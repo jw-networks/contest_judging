@@ -727,3 +727,14 @@ pre.handover { margin: 0; padding: 12px; white-space: pre-wrap; font: 600 14px/1
 .slip-how { font-size: 8.5pt; color: #333; line-height: 1.35; }
 .slip-qr { flex: none; line-height: 0; }
 .slip-qr svg { width: 24mm; height: 24mm; }
+
+/* event roles */
+.event-pick select { max-width: 220px; }
+.ev-roles { display: grid; gap: 8px; }
+.ev-role-row { display: grid; grid-template-columns: minmax(120px, 1fr) minmax(200px, 1.4fr) auto; gap: 10px; align-items: center; }
+.until { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.until input { width: auto; }
+.crew-row { display: grid; grid-template-columns: 1fr auto auto auto; gap: 10px; align-items: center; }
+.crew-add { grid-template-columns: 1fr auto auto auto; }
+@media (max-width: 760px) { .ev-role-row, .crew-row, .crew-add { grid-template-columns: 1fr; } }
+input[type=date]::-webkit-calendar-picker-indicator { filter: invert(.85); cursor: pointer; }

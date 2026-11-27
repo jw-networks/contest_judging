@@ -180,6 +180,14 @@ Each contest can have its own sign-up form. Contest leads and admins turn it on 
 - **Organizations:** links for other organizations include the org code (`#/o/<code>/signup/…`), so entries always land in the right organization. Sign-ups also work on the local network server.
 - **Export:** "Download sign-ups (CSV)" lists everyone who signed up online, with their answers.
 
+## Events: picker, event roles and event admins
+
+- **Event picker:** anyone who works on more than one event gets an event picker beside the contest picker: one event's contests, or **All events**. Remembered per account on each device. On the Admin page, picking an event shows that event's contests and crew.
+- **Event roles:** an account can have a role for a whole event (`user.events[eventId] = { role, until }`): lead, coordinator, judge, viewer, tech, emcee, or **event admin**. It covers every contest in the event, including ones added later. A role for a single contest overrides it there.
+- **End dates:** an event role can end on a day (`until`); after it, the role simply stops counting.
+- **Event admins** are leads on every contest in their event, and can add and archive its contests, rename the event, and manage its crew (`/api/events/<id>/members|candidates|accounts`). They don't see other events or org-wide accounts, backups, transfers or the local server. Only org admins create events, delete contests, and make event admins.
+- **Admin → Crew:** each event's crew, with roles and end dates. The account editor also has event roles. Transfer files write event roles out as contest roles, so a local server needs nothing new.
+
 ## Contestant sign-in
 
 Contestants can sign in with a contestant ID (6 characters, unique in the organization) and a random password to set how to say their name and their emcee intro (until they've been on stage), and to see their own feedback once it's released (Results → Contestant feedback → Show feedback to contestants). They never see judges or other entries.

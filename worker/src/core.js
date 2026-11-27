@@ -14,6 +14,9 @@ import { message, validEmail } from './mail.js';
 
 export const GLOBAL_ROLES = ['admin', 'member'];
 export const CONTEST_ROLES = ['lead', 'coordinator', 'judge', 'viewer', 'tech', 'emcee'];
+// Event roles cover every contest in an event (user.events[eventId] = { role, until }). 'admin' = event admin:
+// a lead on all of the event's contests, who can also add contests to it and manage its crew.
+export const EVENT_ROLES = ['admin', ...CONTEST_ROLES];
 const SHOW_FIELDS = ['music', 'lighting', 'intro', 'pronunciation']; // stage details for tech & emcee
 const MAX_PHOTOS = 8, MAX_PHOTO_BYTES = 1_200_000; // Cloudflare storage values max out at 2 MB
 export const CONTEST_TYPES = ['cosplay', 'makers'];
@@ -772,21 +775,52 @@ ${r.comments.length ? `<p style="margin:0 0 6px;font-size:13px;font-weight:700;l
 
   // ---------- who may do what
   contest(cid) { const c = cid && this.db.data.contests[cid]; return c && !c.deleted ? c : null; }
+  /** Someone's role for a whole event, if they have one that hasn't ended. */
+  eventRole(user, eid) {
+    const e = eid && (user?.events || {})[eid];
+    if (!e || !EVENT_ROLES.includes(e.role)) return null;
+    if (e.until && Date.now() > e.until) return null; // their access for this event has ended
+    const ev = this.db.data.events?.[eid];
+    return ev && !ev.deleted ? e.role : null;
+  }
+  /** Org admins, and admins of this event. */
+  eventAdmin(user, eid) { return user?.role === 'admin' || (!!eid && this.eventRole(user, eid) === 'admin'); }
+  /** Someone's role in a contest: a role for that contest wins; otherwise their role for its event (event admin → lead). */
   roleIn(user, cid) {
     if (!user) return null;
     if (user.role === 'admin') return 'admin';
+    const c = this.contest(cid);
+    if (!c) return null;
     const r = (user.contests || {})[cid];
-    return CONTEST_ROLES.includes(r) && this.contest(cid) ? r : null;
+    if (CONTEST_ROLES.includes(r)) return r;
+    const er = this.eventRole(user, c.eventId);
+    return er === 'admin' ? 'lead' : er;
   }
+  /** Like roleIn, but not counting being an org admin (who works on a contest, for crew lists). */
+  crewRole(u, cid) { return u.role === 'admin' ? ((u.contests || {})[cid] || null) : this.roleIn(u, cid); }
   manages(user, cid) { const r = this.roleIn(user, cid); return r === 'admin' || r === 'lead'; }
   ledContests(user) {
     if (user.role === 'admin') return null; // all
-    return Object.entries(user.contests || {}).filter(([cid, r]) => r === 'lead' && this.contest(cid)).map(([cid]) => cid);
+    return Object.keys(this.db.data.contests).filter(cid => this.roleIn(user, cid) === 'lead');
   }
-  publicUser(u, onlyContests) {
-    const contests = {};
+  adminEvents(user) { return Object.keys(this.db.data.events || {}).filter(eid => this.eventRole(user, eid) === 'admin'); }
+  publicUser(u, onlyContests, onlyEvents) {
+    const contests = {}, events = {};
     for (const [cid, r] of Object.entries(u.contests || {})) if (!onlyContests || onlyContests.includes(cid)) contests[cid] = r;
-    return { id: u.id, username: u.username, displayName: u.displayName, role: u.role, contests, active: u.active, mustChangePassword: !!u.mustChangePassword, rev: u.rev, ...(u.email ? { email: u.email } : {}), ...(this.hooks.isPlatform?.(u) ? { platform: true } : {}) };
+    for (const [eid, e] of Object.entries(u.events || {})) if (!onlyEvents || onlyEvents.includes(eid)) events[eid] = { role: e.role, ...(e.until ? { until: e.until } : {}) };
+    return { id: u.id, username: u.username, displayName: u.displayName, role: u.role, contests, events, active: u.active, mustChangePassword: !!u.mustChangePassword, rev: u.rev, ...(u.email ? { email: u.email } : {}), ...(this.hooks.isPlatform?.(u) ? { platform: true } : {}) };
+  }
+  cleanEventRoles(map, base = {}, allowed = EVENT_ROLES) {
+    const out = { ...base };
+    for (const [eid, v] of Object.entries(map || {})) {
+      if (!this.db.data.events?.[eid]) continue;
+      const role = v && typeof v === 'object' ? v.role : v;
+      if (!role || role === 'none') { delete out[eid]; continue; }
+      if (!allowed.includes(role)) throw new HttpError(403, role === 'admin' ? 'Only organization admins can make someone an event admin' : 'Invalid role');
+      const until = v && typeof v === 'object' && v.until ? Math.round(Number(v.until)) : null;
+      out[eid] = { role, ...(until && until > 0 ? { until } : {}) };
+    }
+    return out;
   }
 
   /** What a user may see of a record. null = nothing at all. */
@@ -795,7 +829,7 @@ ${r.comments.length ? `<p style="margin:0 0 6px;font-size:13px;font-weight:700;l
     if (coll === 'participants' && (rec.ctHash || rec.ctSessions)) rec = strip(rec, 'ctHash', 'ctSessions'); // nor their sign-in
     if (user.role === 'admin') return rec;
     if (coll === 'settings') return rec;
-    if (coll === 'events') return Object.values(this.db.data.contests).some(c => c.eventId === rec.id && this.roleIn(user, c.id)) ? rec : null;
+    if (coll === 'events') return this.eventRole(user, rec.id) || Object.values(this.db.data.contests).some(c => c.eventId === rec.id && this.roleIn(user, c.id)) ? rec : null;
     const cid = coll === 'contests' ? rec.id : rec.contestId;
     const r = this.roleIn(user, cid);
     if (!r) return null;
@@ -934,22 +968,27 @@ ${r.comments.length ? `<p style="margin:0 0 6px;font-size:13px;font-weight:700;l
       if (id !== 'event') return { ok: false, reason: 'invalid settings id' };
       if (user.role !== 'admin') return denied;
     } else if (coll === 'events') {
-      if (user.role !== 'admin') return { ok: false, reason: 'only admins can manage events' };
+      if (user.role !== 'admin') {
+        // Event admins can rename their own event; everything else about events is for org admins.
+        if (!existing || !this.eventAdmin(user, id)) return { ok: false, reason: 'only admins can manage events' };
+        for (const k of Object.keys(patch)) if (k !== 'name') delete patch[k];
+        if (!Object.keys(patch).length) return { ok: false, reason: 'event admins can rename their event, and nothing else here' };
+      }
       if (patch.deleted && Object.values(db.data.contests).some(c => c.eventId === id && !c.deleted)) return { ok: false, reason: 'move or delete this event\'s contests first' };
       if (!existing) Object.assign(patch, { createdAt: Date.now(), name: patch.name || '', order: patch.order ?? Object.keys(store).length + 1 });
     } else if (coll === 'contests') {
       cid = id;
       if (!existing) {
-        if (user.role !== 'admin') return denied;
+        if (!(user.role === 'admin' || this.eventAdmin(user, patch.eventId))) return denied;
         this.createContest({ id, name: patch.name, type: patch.type || 'cosplay', eventId: patch.eventId }, user.id);
         this.audit(user, 'contest.create', { contestId: id, label: `${patch.name || 'New contest'} (${patch.type || 'cosplay'})` });
         this.flags.stages.add(id);
         return { ok: true };
       }
       if (!this.manages(user, cid)) return denied;
-      if ((patch.deleted !== undefined || patch.archived !== undefined) && user.role !== 'admin') return { ok: false, reason: 'only admins can archive or delete contests' };
-      if (patch.eventId !== undefined) {
-        if (user.role !== 'admin') return { ok: false, reason: 'only admins can move contests between events' };
+      if ((patch.deleted !== undefined || patch.archived !== undefined) && !this.eventAdmin(user, existing.eventId)) return { ok: false, reason: 'only admins can archive or delete contests' };
+      if (patch.eventId !== undefined && patch.eventId !== existing.eventId) {
+        if (!(this.eventAdmin(user, existing.eventId) && this.eventAdmin(user, patch.eventId))) return { ok: false, reason: 'only admins can move contests between events' };
         if (!db.data.events[patch.eventId] || db.data.events[patch.eventId].deleted) return { ok: false, reason: 'no such event' };
       }
     } else if (coll === 'scores') {
@@ -1055,14 +1094,21 @@ ${r.comments.length ? `<p style="margin:0 0 6px;font-size:13px;font-weight:700;l
       if (rec.rev > since) { const p = this.project(user, coll, rec); if (p) out.push({ coll, rec: p }); }
     }
     // Accounts: admins see all; leads and viewers see who is in their contests (for judge counts and names).
+    // Event admins also see everyone working on their events (to manage the crew), with only those events' roles.
     const isAdmin = user.role === 'admin';
-    const seeing = isAdmin ? null : Object.entries(user.contests || {}).filter(([cid, r]) => (r === 'lead' || r === 'viewer') && this.contest(cid)).map(([cid]) => cid);
-    if (isAdmin || seeing.length) {
+    const seeing = isAdmin ? null : Object.keys(this.db.data.contests).filter(cid => ['lead', 'viewer'].includes(this.roleIn(user, cid)));
+    const myEvents = isAdmin ? null : this.adminEvents(user);
+    const seeEvents = isAdmin ? null : [...new Set([...myEvents, ...seeing.map(cid => this.db.data.contests[cid]?.eventId).filter(Boolean)])];
+    if (isAdmin || seeing.length || myEvents.length) {
       for (const u of Object.values(this.db.users)) {
         if (u.rev <= since) continue;
         if (isAdmin) out.push({ coll: 'users', rec: this.publicUser(u) });
-        else if (u.id === user.id) out.push({ coll: 'users', rec: this.publicUser(u, seeing) });
-        else if (seeing.some(cid => (u.contests || {})[cid])) { const pu = this.publicUser(u, seeing); delete pu.email; out.push({ coll: 'users', rec: pu }); } // only admins see others' emails
+        else if (u.id === user.id) out.push({ coll: 'users', rec: this.publicUser(u, seeing, seeEvents) });
+        else if (u.role !== 'admin' && (seeing.some(cid => this.crewRole(u, cid)) || myEvents.some(eid => (u.events || {})[eid]))) {
+          const pu = this.publicUser(u, seeing, seeEvents);
+          if (!myEvents.length) delete pu.email; // only admins (and event admins, for their crew) see emails
+          out.push({ coll: 'users', rec: pu });
+        }
       }
     }
     const led = this.ledContests(user);
@@ -1356,7 +1402,7 @@ ${r.comments.length ? `<p style="margin:0 0 6px;font-size:13px;font-weight:700;l
     }
     if (route === 'POST /api/users') {
       const admin = await this.requireUser(req, 'admin');
-      const { username, displayName, role, password, contests, email } = await readBody(req);
+      const { username, displayName, role, password, contests, email, events } = await readBody(req);
       if (email && !validEmail(email)) throw new HttpError(400, 'Please check the email address');
       const uname = String(username || '').trim();
       if (!/^[a-zA-Z0-9._-]{2,40}$/.test(uname)) throw new HttpError(400, 'Username: 2–40 letters, numbers, . _ -');
@@ -1364,7 +1410,7 @@ ${r.comments.length ? `<p style="margin:0 0 6px;font-size:13px;font-weight:700;l
       const grole = role === 'admin' ? 'admin' : 'member';
       if (String(password || '').length < 8) throw new HttpError(400, 'Password must be at least 8 characters');
       const id = newId();
-      db.users[id] = { id, username: uname, displayName: str(displayName || uname, 80), role: grole, contests: this.cleanContestRoles(contests), ...(await hashPassword(password)), active: true, mustChangePassword: true, ...(email ? { email: String(email).trim() } : {}), createdAt: Date.now(), rev: this.bump() };
+      db.users[id] = { id, username: uname, displayName: str(displayName || uname, 80), role: grole, contests: this.cleanContestRoles(contests), events: this.cleanEventRoles(events), ...(await hashPassword(password)), active: true, mustChangePassword: true, ...(email ? { email: String(email).trim() } : {}), createdAt: Date.now(), rev: this.bump() };
       this.dirty.add('users');
       this.audit(admin, 'user.create', { target: id, label: `${uname} (${grole}${Object.keys(db.users[id].contests).length ? ', ' + Object.entries(db.users[id].contests).map(([c, r]) => `${db.data.contests[c].name}: ${r}`).join(', ') : ''})` });
       return json(200, { user: this.publicUser(db.users[id]) });
@@ -1388,6 +1434,10 @@ ${r.comments.length ? `<p style="margin:0 0 6px;font-size:13px;font-weight:700;l
         const grole = body.role === 'admin' ? 'admin' : 'member';
         if (u.role === 'admin' && grole !== 'admin' && admins.length <= 1) throw new HttpError(400, 'Keep at least one active admin');
         u.role = grole; changes.push(grole === 'admin' ? 'made admin' : 'admin removed');
+      }
+      if (body.events !== undefined) {
+        u.events = this.cleanEventRoles(body.events, u.events || {});
+        changes.push('events: ' + (Object.entries(body.events).map(([e, v]) => `${db.data.events?.[e]?.name || e} → ${(v && (v.role || v)) || 'none'}${v?.until ? ' until ' + new Date(v.until).toISOString().slice(0, 10) : ''}`).join(', ') || 'none'));
       }
       if (body.contests !== undefined) {
         u.contests = this.cleanContestRoles(body.contests, u.contests || {});
@@ -1524,7 +1574,7 @@ ${r.comments.length ? `<p style="margin:0 0 6px;font-size:13px;font-weight:700;l
       const cid = cm[1];
       if (!this.contest(cid)) throw new HttpError(404, 'No such contest');
       if (!this.manages(actor, cid)) throw new HttpError(403, 'Only admins and this contest\'s leads can manage its people');
-      const isAdminActor = actor.role === 'admin';
+      const isAdminActor = this.eventAdmin(actor, this.db.data.contests[cid].eventId); // org admins and this event's admins
       const grantable = isAdminActor ? CONTEST_ROLES : ['judge', 'coordinator', 'viewer', 'tech', 'emcee'];
       const cname = this.db.data.contests[cid].name;
 
@@ -1550,7 +1600,7 @@ ${r.comments.length ? `<p style="margin:0 0 6px;font-size:13px;font-weight:700;l
         u.rev = this.bump();
         this.dirty.add('users');
         this.audit(actor, 'access.update', { contestId: cid, target: u.id, label: `${u.displayName} → ${next || 'removed'} in ${cname}` });
-        return json(200, { user: this.publicUser(u, isAdminActor ? undefined : [cid]) });
+        return json(200, { user: this.publicUser(u, actor.role === 'admin' ? undefined : [cid]) });
       }
 
       if (cm[2] === 'accounts' && req.method === 'POST') {
@@ -1565,7 +1615,52 @@ ${r.comments.length ? `<p style="margin:0 0 6px;font-size:13px;font-weight:700;l
         db.users[id] = { id, username: uname, displayName: str(displayName || uname, 80), role: 'member', contests: { [cid]: r }, ...(await hashPassword(password)), active: true, mustChangePassword: true, createdAt: Date.now(), rev: this.bump() };
         this.dirty.add('users');
         this.audit(actor, 'user.create', { contestId: cid, target: id, label: `${uname} as ${r} in ${cname}` });
-        return json(200, { user: this.publicUser(db.users[id], isAdminActor ? undefined : [cid]) });
+        return json(200, { user: this.publicUser(db.users[id], actor.role === 'admin' ? undefined : [cid]) });
+      }
+      throw new HttpError(405, 'Method not allowed');
+    }
+
+    // ---- event crew: org admins and that event's admins. Roles here cover every contest in the event.
+    const em = url.pathname.match(/^\/api\/events\/([\w-]+)\/(members|candidates|accounts)$/);
+    if (em) {
+      const actor = await this.requireUser(req);
+      const eid = em[1], ev = db.data.events?.[eid];
+      if (!ev || ev.deleted) throw new HttpError(404, 'No such event');
+      if (!this.eventAdmin(actor, eid)) throw new HttpError(403, 'Only admins and this event\'s admins can manage its crew');
+      const orgAdmin = actor.role === 'admin';
+      const grantable = orgAdmin ? EVENT_ROLES : CONTEST_ROLES; // only org admins make event admins
+      const label = (r, until) => `${r === 'admin' ? 'event admin' : r}${until ? ' until ' + new Date(until).toISOString().slice(0, 10) : ''}`;
+      if (em[2] === 'candidates' && req.method === 'GET') {
+        const list = Object.values(db.users).filter(u => u.active && u.role !== 'admin' && !(u.events || {})[eid])
+          .map(u => ({ id: u.id, displayName: u.displayName, username: u.username })).sort((a, b) => a.displayName.localeCompare(b.displayName));
+        return json(200, { candidates: list });
+      }
+      if (em[2] === 'members' && req.method === 'POST') {
+        const { userId, role, until } = await readBody(req);
+        const u = db.users[userId];
+        if (!u) throw new HttpError(404, 'No such account');
+        if (u.role === 'admin') throw new HttpError(400, 'Organization admins already have full access to every event');
+        const current = (u.events || {})[eid]?.role || null;
+        if (!orgAdmin && current === 'admin') throw new HttpError(403, 'Only organization admins can change or remove an event admin');
+        if (role && !u.active) throw new HttpError(400, 'That account is disabled');
+        u.events = this.cleanEventRoles({ [eid]: role ? { role, until } : null }, u.events || {}, grantable);
+        u.rev = this.bump(); this.dirty.add('users');
+        this.audit(actor, 'access.update', { target: u.id, label: `${u.displayName} → ${role ? label(role, u.events[eid]?.until) : 'removed'} for ${ev.name || 'the event'}` });
+        return json(200, { user: this.publicUser(u, orgAdmin ? undefined : [], orgAdmin ? undefined : [eid]) });
+      }
+      if (em[2] === 'accounts' && req.method === 'POST') {
+        const { username, displayName, password, role, until, email } = await readBody(req);
+        const uname = String(username || '').trim();
+        if (!/^[a-zA-Z0-9._-]{2,40}$/.test(uname)) throw new HttpError(400, 'Username: 2–40 letters, numbers, . _ -');
+        if (Object.values(db.users).some(x => x.username.toLowerCase() === uname.toLowerCase())) throw new HttpError(400, 'That username is taken');
+        if (String(password || '').length < 8) throw new HttpError(400, 'Temporary password must be at least 8 characters');
+        if (email && !validEmail(email)) throw new HttpError(400, 'Please check the email address');
+        const id = newId();
+        const events = this.cleanEventRoles({ [eid]: { role: role || 'judge', until } }, {}, grantable);
+        db.users[id] = { id, username: uname, displayName: str(displayName || uname, 80), role: 'member', contests: {}, events, ...(await hashPassword(password)), active: true, mustChangePassword: true, ...(email ? { email: String(email).trim() } : {}), createdAt: Date.now(), rev: this.bump() };
+        this.dirty.add('users');
+        this.audit(actor, 'user.create', { target: id, label: `${uname} as ${label(events[eid].role, events[eid].until)} for ${ev.name || 'the event'}` });
+        return json(200, { user: this.publicUser(db.users[id], orgAdmin ? undefined : [], orgAdmin ? undefined : [eid]) });
       }
       throw new HttpError(405, 'Method not allowed');
     }
@@ -1579,9 +1674,11 @@ ${r.comments.length ? `<p style="margin:0 0 6px;font-size:13px;font-weight:700;l
       const cids = Object.values(db.data.contests).filter(c => !c.deleted && (!want.length || want.includes(c.id))).map(c => c.id);
       const pick = coll => Object.fromEntries(Object.entries(db.data[coll]).filter(([, r]) => cids.includes(r.contestId) && !r.deleted));
       const scorers = new Set(Object.values(db.data.scores).filter(x => cids.includes(x.contestId)).map(x => x.judgeId));
-      const users = Object.values(db.users).filter(u => u.role === 'admin' || scorers.has(u.id) || cids.some(cid => (u.contests || {})[cid]))
-        .map(({ id, username, displayName, role, contests, active, mustChangePassword, salt, passHash, iter }) =>
-          ({ id, username, displayName, role, contests: Object.fromEntries(Object.entries(contests || {}).filter(([cid]) => cids.includes(cid))), active, mustChangePassword: !!mustChangePassword, salt, passHash, iter }));
+      // Each person's role per contest, with event roles written out as contest roles (the file carries contests, not events).
+      const users = Object.values(db.users).filter(u => u.role === 'admin' || scorers.has(u.id) || cids.some(cid => this.crewRole(u, cid)))
+        .map(u => ({ id: u.id, username: u.username, displayName: u.displayName, role: u.role,
+          contests: Object.fromEntries(cids.map(cid => [cid, this.crewRole(u, cid)]).filter(([, r]) => r && r !== 'admin')),
+          active: u.active, mustChangePassword: !!u.mustChangePassword, salt: u.salt, passHash: u.passHash, iter: u.iter }));
       const data = {
         contests: Object.fromEntries(cids.map(cid => [cid, db.data.contests[cid]])),
         events: Object.fromEntries([...new Set(cids.map(cid => db.data.contests[cid].eventId).filter(e => e && db.data.events[e]))].map(e => [e, db.data.events[e]])),
