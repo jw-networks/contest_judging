@@ -21,7 +21,7 @@ import { Contest, HttpError, json } from './core.js';
 // no org = the default org, which is the original single database ('main'), so existing devices keep working.
 // Without a DIRECTORY binding (the local network server) there is just the one database.
 export const DEFAULT_ORG = 'main';
-const INTERNAL = 'X-Spotlight-Internal', ORG_ID = 'X-Spotlight-Org-Id';
+const INTERNAL = 'X-Spotlight-Internal', ORG_ID = 'X-Spotlight-Org-Id', ORG_NAME = 'X-Spotlight-Org-Name';
 const orgCache = new Map(); // code -> { org, at } (per isolate; 20 s)
 
 export async function directory(env, path, body) {
@@ -72,7 +72,7 @@ export default {
         else {
           // Forward with our own markers only: drop any a client tried to send.
           const headers = new Headers(req.headers);
-          headers.delete(INTERNAL); headers.set(ORG_ID, org.id);
+          headers.delete(INTERNAL); headers.set(ORG_ID, org.id); headers.set(ORG_NAME, encodeURIComponent(org.name || ''));
           res = await orgStub(env, org.id).fetch(new Request(req, { headers }));
         }
       }
@@ -427,6 +427,7 @@ export class ContestDB {
     this.contest = new Contest(this.storeAdapter(), {
       broadcast: (t, d) => this.broadcast(t, d), local: !!env.LOCAL_MODE,
       missingPhoto: id => this.photoFromBackup(id),
+      orgName: () => this.orgName || '',
       emailOn: () => emailOn(env),
       sendEmail: m => sendViaResend(env, env.FETCH || ((...a) => fetch(...a)), m),
       appBase: base => appBase(env, base),
@@ -507,6 +508,8 @@ export class ContestDB {
     // Only the edge sets these (it strips them from client requests).
     const internal = req.headers.get(INTERNAL) === '1';
     const orgId = req.headers.get(ORG_ID) || DEFAULT_ORG;
+    // The organization's name, as the edge knows it (shown in the app's title bar). Not set on a local server.
+    try { const n = req.headers.get(ORG_NAME); if (n != null) this.orgName = decodeURIComponent(n); } catch { /* ignore a bad header */ }
     if (!this.contest.db && !this.fresh) await this.ctx.blockConcurrencyWhile(() => this.init());
     if (this.fresh && !this.contest.db) {
       if (orgId === DEFAULT_ORG && !(await this.ctx.storage.get('orgId'))) await this.ctx.blockConcurrencyWhile(() => this.setupDefault());

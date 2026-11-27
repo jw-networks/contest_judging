@@ -385,6 +385,7 @@ async function sync({ full = false } = {}) {
     S.clockOffset = res.serverTime - (t0 + t1) / 2;
     localStorage.setItem('cj-offset', String(Math.round(S.clockOffset)));
     S.emailOn = !!res.email;
+    if (res.orgName !== undefined && S.account && S.account.orgName !== res.orgName) { S.account.orgName = res.orgName; saveAccount(S.account); scheduleRender(); }
     const sent = new Set(batch.map(o => o.key));
     S.outbox = S.outbox.filter(o => !sent.has(o.key));
     let needFull = false;
@@ -706,11 +707,18 @@ function render() {
       h('option', { value: '', selected: !ef }, 'All events'));
     fitSelect($('#epick'));
   }
+  // Title bar. The pickers name the event and contest when they're shown, so the brand names what they don't:
+  //   event + contest pickers → the organization;  event picker only → the contest;
+  //   contest picker only → the event;  no pickers → the contest (with the event above it).
+  const orgName = S.account.orgName || '';
+  const kicker = $('#brand-kicker'), big = $('#ev-name');
+  const noContest = canAdmin() ? (ef ? 'No contests in this event yet' : 'No contests yet') : APP_NAME;
+  kicker.classList.remove('hidden');
+  if (evSwitch && switchable) { kicker.textContent = orgName ? APP_NAME : ''; kicker.classList.toggle('hidden', !orgName); big.textContent = orgName || APP_NAME; }
+  else if (evSwitch) { kicker.textContent = orgName || APP_NAME; big.textContent = curId() ? settings().name : noContest; }
+  else if (switchable) { kicker.textContent = eventName() ? APP_NAME : ''; kicker.classList.toggle('hidden', !eventName()); big.textContent = eventName() || APP_NAME; }
+  else { kicker.textContent = eventName() ? `${APP_NAME} · ${eventName()}` : APP_NAME; big.textContent = curId() ? settings().name : noContest; }
   if (switchable) {
-    // Contest name lives in the picker; the brand shows the event (or just the app name).
-    $('#brand-kicker').textContent = eventName() ? APP_NAME : '';
-    $('#brand-kicker').classList.toggle('hidden', !eventName());
-    $('#ev-name').textContent = eventName() || APP_NAME;
     const typeTag = c => c.type === 'makers' ? ' (Makers)' : '';
     const opt = c => h('option', { value: c.id, selected: c.id === curId() }, c.name + typeTag(c));
     const evIds = [...new Set(openable.map(c => c.eventId || ''))];
@@ -719,10 +727,6 @@ function render() {
       : openable.map(opt)),
       ...(isAdmin() || (ef && isEventAdmin(ef)) ? [h('option', { value: '__new__' }, '＋ New contest…')] : []));
     fitSelect($('#cpick'));
-  } else {
-    $('#ev-name').textContent = curId() ? settings().name : (canAdmin() ? (ef ? 'No contests in this event yet' : 'No contests yet') : APP_NAME);
-    $('#brand-kicker').textContent = eventName() ? `${APP_NAME} · ${eventName()}` : APP_NAME;
-    $('#brand-kicker').classList.remove('hidden');
   }
   $('#who').textContent = S.account.user.displayName;
   const monitorLink = !!curId() && !isMakers() && !['judge', 'viewer', 'emcee'].includes(role());

@@ -1392,7 +1392,7 @@ ${r.comments.length ? `<p style="margin:0 0 6px;font-size:13px;font-weight:700;l
       }
       if (this.mailQueue?.length) await this.drainMail();
       const reset = since > db.rev;
-      return json(200, { rev: db.rev, schema: db.schema, reset, results, changes: this.pull(u, reset ? 0 : since), user: this.publicUser(u), serverTime: Date.now(), email: this.emailOn });
+      return json(200, { rev: db.rev, schema: db.schema, reset, results, changes: this.pull(u, reset ? 0 : since), user: this.publicUser(u), serverTime: Date.now(), email: this.emailOn, orgName: this.hooks.orgName?.() || '' });
     }
 
     // ---- admin: accounts and access
